@@ -2,12 +2,13 @@ name: Abbott API Demo Pipeline
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main, dev ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, dev ]
 
 env:
-  AZURE_WEBAPP_NAME: 'REPLACE_WITH_YOUR_APP_NAME'  # CHANGE THIS AFTER SETUP
+  AZURE_WEBAPP_NAME: 'abbott-api-demo-1755792138'
+  AZURE_LOCATION: 'Central India'
   DOTNET_VERSION: '6.0.x'
 
 jobs:
