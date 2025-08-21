@@ -9,7 +9,7 @@ public class WeatherController : ControllerBase
 {
     private static readonly string[] Summaries = new[]
     {
-        "Freezing", "Bracing", "Chilly", "Cool", "Mild", 
+        "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Pleasant",
         "Warm", "Balmy", "Hot", "Sweltering", "Scorching", "Raining"
     };
 
