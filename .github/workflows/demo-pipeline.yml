@@ -129,7 +129,12 @@ jobs:
           
           echo "ServiceNow Change Request created: $CR_NUMBER"
 
-          # Add comment to PRcurl -X POST \ -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \ -H "Content-Type:application/json" \ -d "{\"body\": \"📋 **ServiceNow Change Request Created**\n\n- **Change Request**:[$CR_NUMBER](${{ secrets.SERVICENOW_INSTANCE }}/nav_to.do?uri=change_request.do?sys_id=$CR_SYS_ID)\n- **Status**: Waiting for approval\n\nPlease approve in ServiceNow before merging this PR.\"}" \ "${{ github.api_url }}/repos/${{ github.repository }}/issues/${{ github.event.number }}/comments"
+          # Add comment to PR
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"body\": \"📋 **ServiceNow Change Request Created**\n\n- **Change Request**: [$CR_NUMBER](${{ secrets.SERVICENOW_INSTANCE }}/nav_to.do?uri=change_request.do?sys_id=$CR_SYS_ID)\n- **Status**: Waiting for approval\n\nPlease approve in ServiceNow before merging this PR.\"}" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/issues/${{ github.event.number }}/comments"
  
   # Verify ServiceNow Approval
   verify-servicenow-approval:
@@ -221,12 +226,21 @@ jobs:
           # Simulate health check (replace with actual curl in production)
           echo "✅ Health check passed - API is responding"
           
-      - name: Update ServiceNow SR
+      - name: Update ServiceNow CR Status
         run: |
-          echo "📋 Updating ServiceNow SR: ${{ needs.mock-servicenow.outputs.sr-number }}"
-          echo "✅ Deployment completed successfully"
-          echo "🔗 Live API URL: https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net"
-          echo "📊 Status: Implementation Complete"
+          echo "📋 Updating ServiceNow CR: ${{ needs.verify-servicenow-approval.outputs.cr-number }}"
+          
+          # Update ServiceNow change request with deployment status
+          curl -X PATCH \
+            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "state": "3",
+              "work_notes": "Deployment completed successfully\nVersion: ${{ needs.build-and-test.outputs.version }}\nDeployed to: ${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net"
+            }' \
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request?sysparm_query=number=${{ needs.verify-servicenow-approval.outputs.cr-number }}"
+          
+          echo "✅ ServiceNow CR updated with deployment status"
 
   update-apim:
     name: 🌐 Update API Management
@@ -279,7 +293,7 @@ jobs:
   deployment-summary:
     name: 📢 Deployment Complete
     runs-on: ubuntu-latest
-    needs: [deploy-to-azure, update-apim, mock-servicenow, build-and-test]
+    needs: [deploy-to-azure, update-apim, verify-servicenow-approval, build-and-test]
     if: always() && needs.deploy-to-azure.result == 'success' && github.event_name == 'push'
     
     steps:
@@ -294,8 +308,8 @@ jobs:
           echo "📊 Deployment Summary:"
           echo "  🔐 Security Scan: ✅ Passed"
           echo "  🔨 Build & Test: ✅ Success"
-          echo "  📋 ServiceNow SR: ${{ needs.mock-servicenow.outputs.sr-number }}"
-          echo "  ✅ Stakeholder Approvals: Received"
+          echo "  📋 ServiceNow CR: ${{ needs.verify-servicenow-approval.outputs.cr-number }}"
+          echo "  ✅ ServiceNow Approval: Verified"
           echo "  🚀 Azure Deployment: Success"
           echo "  🌐 APIM Update: Complete"
           echo "  📝 Version: ${{ needs.build-and-test.outputs.version }}"
@@ -360,7 +374,8 @@ jobs:
           <strong>Timestamp:</strong> ${{ steps.extended-info.outputs.deploy-time }}<br/>
           <strong>Version:</strong> ${{ steps.extended-info.outputs.version }}<br/>
           <strong>Build Number:</strong> ${{ steps.extended-info.outputs.build-number }}<br/>
-          <strong>Deployed by:</strong> ${{ steps.extended-info.outputs.actor }}</p>
+          <strong>Deployed by:</strong> ${{ steps.extended-info.outputs.actor }}<br/>
+          <strong>ServiceNow CR:</strong> ${{ needs.verify-servicenow-approval.outputs.cr-number }}</p>
           
           <h2>Infrastructure Details</h2>
           <p><strong>App Service:</strong> ${{ env.AZURE_WEBAPP_NAME }}<br/>
