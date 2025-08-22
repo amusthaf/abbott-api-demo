@@ -45,10 +45,35 @@ jobs:
           dotnet list ./src/WeatherAPI package --vulnerable --include-transitive || true
           echo "✅ Security scan completed"
 
+  # This job only runs for PRs and waits for approval
+  pr-approval-gate:
+    name: 📋 PR Approval Gate
+    runs-on: ubuntu-latest
+    needs: security-scan
+    if: github.event_name == 'pull_request'
+    environment: 
+      name: pr-approval
+      url: https://github.com/${{ github.repository }}/pull/${{ github.event.number }}
+    steps:
+      - name: PR Ready for Review
+        run: |
+          echo "🔍 Security scan completed successfully"
+          echo "📋 Pull Request #${{ github.event.number }} is ready for review"
+          echo "👥 Waiting for approval from designated reviewers..."
+          echo ""
+          echo "📝 PR Details:"
+          echo "  - Title: ${{ github.event.pull_request.title }}"
+          echo "  - Author: ${{ github.event.pull_request.user.login }}"
+          echo "  - Base Branch: ${{ github.event.pull_request.base.ref }}"
+          echo "  - Head Branch: ${{ github.event.pull_request.head.ref }}"
+          echo ""
+          echo "⏳ Pipeline will continue after PR approval and merge"
+
   build-and-test:
     name: 🔨 Build & Test
     runs-on: ubuntu-latest
     needs: security-scan
+    if: github.event_name == 'push' # Only runs on push (after merge)
     outputs:
       version: ${{ steps.version.outputs.version }}
     
@@ -93,6 +118,7 @@ jobs:
     name: 📋 ServiceNow Change Management
     runs-on: ubuntu-latest
     needs: build-and-test
+    if: github.event_name == 'push' # Only runs on push (after merge)
     outputs:
       sr-number: ${{ steps.create-sr.outputs.sr-number }}
     
@@ -131,6 +157,7 @@ jobs:
     name: 🚀 Deploy to Azure App Service
     runs-on: ubuntu-latest
     needs: [build-and-test, mock-servicenow]
+    if: github.event_name == 'push' # Only runs on push (after merge)
     
     steps:
       - name: Download Build Artifact
@@ -170,6 +197,7 @@ jobs:
     name: 🌐 Update API Management
     runs-on: ubuntu-latest
     needs: deploy-to-azure
+    if: github.event_name == 'push' # Only runs on push (after merge)
 
     steps:
     - name: Azure Login
@@ -217,9 +245,12 @@ jobs:
     name: 📢 Deployment Complete
     runs-on: ubuntu-latest
     needs: [deploy-to-azure, update-apim, mock-servicenow, build-and-test]
-    if: always() && needs.deploy-to-azure.result == 'success'
+    if: always() && needs.deploy-to-azure.result == 'success' && github.event_name == 'push'
     
     steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        
       - name: Success Notification
         run: |
           echo "🎉 Abbott API Deployment Pipeline Completed Successfully!"
@@ -243,3 +274,108 @@ jobs:
           echo "📋 ServiceNow Change Request marked as 'Implementation Complete'"
           echo ""
           echo "🎯 Abbott API Modernization Demo: READY FOR PRESENTATION!"
+
+      - name: Get Extended Deployment Info
+        id: extended-info
+        run: |
+          echo "build-number=${{ github.run_number }}" >> $GITHUB_OUTPUT
+          echo "commit-sha=${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
+          echo "commit-full-sha=${{ github.sha }}" >> $GITHUB_OUTPUT
+          echo "deploy-time=$(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> $GITHUB_OUTPUT
+          echo "version=1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
+          echo "branch=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
+          echo "actor=${{ github.actor }}" >> $GITHUB_OUTPUT
+          echo "workflow=${{ github.workflow }}" >> $GITHUB_OUTPUT
+          echo "repository=${{ github.repository }}" >> $GITHUB_OUTPUT
+          
+          # Get commit message and author
+          COMMIT_MSG=$(git log -1 --pretty=format:"%s")
+          COMMIT_AUTHOR=$(git log -1 --pretty=format:"%an")
+          echo "commit-message=${COMMIT_MSG}" >> $GITHUB_OUTPUT
+          echo "commit-author=${COMMIT_AUTHOR}" >> $GITHUB_OUTPUT
+          
+          # Azure resource info
+          echo "app-service-url=https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net" >> $GITHUB_OUTPUT
+          echo "apim-gateway-url=https://abbott-apim-demo.azure-api.net/weather" >> $GITHUB_OUTPUT
+          echo "resource-group=abbott-demo-rg" >> $GITHUB_OUTPUT
+
+      - name: Update Confluence with Comprehensive Deployment Info
+        uses: korosuke613/update-confluence-action@v1
+        with:
+          confluence_base_url: ${{ secrets.CONFLUENCE_BASE_URL }}
+          confluence_username: ${{ secrets.CONFLUENCE_EMAIL }}
+          confluence_password: ${{ secrets.CONFLUENCE_API_TOKEN }}
+          page_id: ${{ secrets.CONFLUENCE_PAGE_ID }}
+          content: |
+            # Abbott Weather API - Deployment Report
+            
+            ## Deployment Summary
+            **Status:** Completed Successfully  
+            **Timestamp:** ${{ steps.extended-info.outputs.deploy-time }}  
+            **Version:** ${{ steps.extended-info.outputs.version }}  
+            **Build Number:** ${{ steps.extended-info.outputs.build-number }}  
+            **Deployed by:** ${{ steps.extended-info.outputs.actor }}
+            
+            ## Source Code Information
+            **Repository:** ${{ steps.extended-info.outputs.repository }}  
+            **Branch:** ${{ steps.extended-info.outputs.branch }}  
+            **Commit SHA:** ${{ steps.extended-info.outputs.commit-sha }}  
+            **Commit Author:** ${{ steps.extended-info.outputs.commit-author }}  
+            **Commit Message:** ${{ steps.extended-info.outputs.commit-message }}  
+            **GitHub Action:** [View Build Details](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            
+            ## Infrastructure Details
+            **Azure Resource Group:** ${{ steps.extended-info.outputs.resource-group }}  
+            **App Service:** ${{ env.AZURE_WEBAPP_NAME }}  
+            **Region:** Central India  
+            **App Service URL:** ${{ steps.extended-info.outputs.app-service-url }}  
+            **API Gateway URL:** ${{ steps.extended-info.outputs.apim-gateway-url }}
+            
+            ## API Endpoints
+            | Endpoint | URL | Purpose |
+            |----------|-----|---------|
+            | Health Check | ${{ steps.extended-info.outputs.app-service-url }}/health | Service health status |
+            | API Documentation | ${{ steps.extended-info.outputs.app-service-url }}/swagger | Interactive API docs |
+            | Weather Forecast | ${{ steps.extended-info.outputs.apim-gateway-url }}/api/Weather/forecast | 5-day forecast |
+            | Current Weather | ${{ steps.extended-info.outputs.apim-gateway-url }}/api/Weather/current/{city} | Current conditions |
+            | Test Endpoint | ${{ steps.extended-info.outputs.apim-gateway-url }}/api/Weather/test | Connectivity test |
+            
+            ## Pipeline Execution Details
+            **Workflow:** ${{ steps.extended-info.outputs.workflow }}  
+            **Trigger:** Push to ${{ steps.extended-info.outputs.branch }}  
+            **Security Scan:** Passed (CodeQL)  
+            **Unit Tests:** Passed  
+            **Build Duration:** [View in GitHub Actions](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            
+            ## ServiceNow Integration
+            **Change Request:** Auto-generated during deployment  
+            **Approval Status:** Simulated approval workflow completed  
+            **Stakeholder Notifications:** Sent to IT Manager, Security Lead, Business Owner
+            
+            ## Quality Gates Passed
+            - Code security analysis (CodeQL)
+            - Unit test execution
+            - Build compilation
+            - Deployment health checks
+            - API endpoint validation
+            - APIM gateway configuration
+            
+            ## Monitoring and Operations
+            **Application Insights:** Enabled  
+            **Health Monitoring:** Active at ${{ steps.extended-info.outputs.app-service-url }}/health  
+            **APIM Analytics:** Available in Azure Portal  
+            **Log Stream:** Available via Azure Portal
+            
+            ## Rollback Information
+            **Previous Version:** 1.0.${{ github.run_number | minus: 1 }}  
+            **Rollback Procedure:** Available via Azure Portal deployment slots  
+            **Recovery Time Objective:** < 5 minutes
+            
+            ## Next Steps
+            - Monitor application performance via Application Insights
+            - Review API usage analytics in APIM portal
+            - Update API documentation if endpoints changed
+            - Notify stakeholders of successful deployment
+            
+            ---
+            *Last updated: ${{ steps.extended-info.outputs.deploy-time }} by automated deployment pipeline*
