@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using Moq;
 using WeatherAPI.Controllers;
+using Xunit;
 
 namespace WeatherAPI.Tests;
 
