@@ -45,30 +45,6 @@ jobs:
           dotnet list ./src/WeatherAPI package --vulnerable --include-transitive || true
           echo "✅ Security scan completed"
 
-  # This job only runs for PRs and waits for approval
-  pr-approval-gate:
-    name: 📋 PR Approval Gate
-    runs-on: ubuntu-latest
-    needs: security-scan
-    if: github.event_name == 'pull_request'
-    environment: 
-      name: pr-approval
-      url: https://github.com/${{ github.repository }}/pull/${{ github.event.number }}
-    steps:
-      - name: PR Ready for Review
-        run: |
-          echo "🔍 Security scan completed successfully"
-          echo "📋 Pull Request #${{ github.event.number }} is ready for review"
-          echo "👥 Waiting for approval from designated reviewers..."
-          echo ""
-          echo "📝 PR Details:"
-          echo "  - Title: ${{ github.event.pull_request.title }}"
-          echo "  - Author: ${{ github.event.pull_request.user.login }}"
-          echo "  - Base Branch: ${{ github.event.pull_request.base.ref }}"
-          echo "  - Head Branch: ${{ github.event.pull_request.head.ref }}"
-          echo ""
-          echo "⏳ Pipeline will continue after PR approval and merge"
-
   build-and-test:
     name: 🔨 Build & Test
     runs-on: ubuntu-latest
@@ -114,50 +90,109 @@ jobs:
           name: webapp-artifact-${{ steps.version.outputs.version }}
           path: ./publish
 
-  mock-servicenow:
-    name: 📋 ServiceNow Change Management
+  # ServiceNow CR Integration
+  create-servicenow-cr:
+    name: 📋 Create ServiceNow Change Request
     runs-on: ubuntu-latest
-    needs: build-and-test
-    if: github.event_name == 'push' # Only runs on push (after merge)
+    needs: security-scan
+    if: github.event_name == 'pull_request'
     outputs:
-      sr-number: ${{ steps.create-sr.outputs.sr-number }}
+      cr-number: ${{ steps.create-cr.outputs.cr-number }}
+      cr-sys-id: ${{ steps.create-cr.outputs.cr-sys-id }}
     
     steps:
       - name: Create ServiceNow Change Request
-        id: create-sr
+        id: create-cr
         run: |
-          SR_NUMBER="CHG$(date +%Y%m%d%H%M%S)"
-          echo "🎯 Creating ServiceNow Change Request: $SR_NUMBER"
-          echo "📝 Description: Deploy Abbott Weather API v${{ needs.build-and-test.outputs.version }}"
-          echo "👥 Requesting approval from stakeholders..."
-          echo "sr-number=$SR_NUMBER" >> $GITHUB_OUTPUT
-          echo ""
-          echo "📋 Change Request Details:"
-          echo "  📊 Priority: 3 - Moderate"
-          echo "  📂 Category: Software Deployment"
-          echo "  👤 Requested by: api-automation@abbott.com"
-          echo "  📅 Scheduled: $(date)"
-          echo ""
-          echo "✅ ServiceNow Change Request created successfully"
+          echo "Creating ServiceNow Change Request..."
           
-      - name: Simulate Approval Process
+          RESPONSE=$(curl -s -X POST \
+            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "short_description": "Deploy Abbott Weather API - PR #${{ github.event.number }}",
+              "description": "Automated deployment request\nRepository: ${{ github.repository }}\nPR: ${{ github.event.pull_request.title }}\nBranch: ${{ github.event.pull_request.head.ref }}\nAuthor: ${{ github.event.pull_request.user.login }}\nCommit: ${{ github.event.pull_request.head.sha }}",
+              "category": "Software",
+              "priority": "3",
+              "risk": "3",
+              "state": "1",
+              "type": "normal",
+              "u_commit_sha": "${{ github.event.pull_request.head.sha }}"
+            }' \
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request")
+          
+          CR_NUMBER=$(echo "$RESPONSE" | jq -r '.result.number')
+          CR_SYS_ID=$(echo "$RESPONSE" | jq -r '.result.sys_id')
+          
+          echo "cr-number=$CR_NUMBER" >> $GITHUB_OUTPUT
+          echo "cr-sys-id=$CR_SYS_ID" >> $GITHUB_OUTPUT
+          
+          echo "ServiceNow Change Request created: $CR_NUMBER"
+
+          # Add comment to PRcurl -X POST \ -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \ -H "Content-Type:application/json" \ -d "{\"body\": \"📋 **ServiceNow Change Request Created**\n\n- **Change Request**:[$CR_NUMBER](${{ secrets.SERVICENOW_INSTANCE }}/nav_to.do?uri=change_request.do?sys_id=$CR_SYS_ID)\n- **Status**: Waiting for approval\n\nPlease approve in ServiceNow before merging this PR.\"}" \ "${{ github.api_url }}/repos/${{ github.repository }}/issues/${{ github.event.number }}/comments"
+ 
+  # Verify ServiceNow Approval
+  verify-servicenow-approval:
+    name: 📋 Verify ServiceNow Approval
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.event_name == 'push'
+    outputs:
+      approved: ${{ steps.check-approval.outputs.approved }}
+      cr-number: ${{ steps.check-approval.outputs.cr-number }}
+    
+    steps:
+      - name: Check ServiceNow Approval Status
+        id: check-approval
         run: |
-          echo "⏳ Waiting for stakeholder approvals..."
-          echo "📧 Notification sent to:"
-          echo "  - IT Manager: John Smith (john.smith@abbott.com)"
-          echo "  - Security Lead: Sarah Johnson (sarah.johnson@abbott.com)"
-          echo "  - Business Owner: Mike Davis (mike.davis@abbott.com)"
-          echo ""
-          echo "⏱️ Simulating approval time..."
-          sleep 8
-          echo "✅ All approvals received!"
-          echo "🚀 Authorized to proceed with deployment"
+          echo "Looking for ServiceNow Change Request for commit ${{ github.sha }}"
+          
+          # Query ServiceNow for change request with this commit SHA
+          RESPONSE=$(curl -s \
+            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request?sysparm_query=u_commit_sha=${{ github.sha }}")
+          
+          CR_COUNT=$(echo "$RESPONSE" | jq '.result | length')
+          
+          if [ "$CR_COUNT" -eq 0 ]; then
+            echo "No ServiceNow Change Request found. Creating emergency CR..."
+            EMERGENCY_RESPONSE=$(curl -s -X POST \
+              -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+              -H "Content-Type: application/json" \
+              -d '{
+                "short_description": "Emergency Deploy - Direct Push",
+                "description": "Direct push deployment\nCommit: ${{ github.sha }}",
+                "category": "Software",
+                "priority": "2",
+                "state": "3",
+                "approval": "approved",
+                "u_commit_sha": "${{ github.sha }}"
+              }' \
+              "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request")
+            
+            CR_NUMBER=$(echo "$EMERGENCY_RESPONSE" | jq -r '.result.number')
+            echo "approved=true" >> $GITHUB_OUTPUT
+            echo "cr-number=$CR_NUMBER" >> $GITHUB_OUTPUT
+          else
+            CR_NUMBER=$(echo "$RESPONSE" | jq -r '.result[0].number')
+            APPROVAL=$(echo "$RESPONSE" | jq -r '.result[0].approval')
+            
+            if [ "$APPROVAL" = "approved" ]; then
+              echo "ServiceNow approval verified for CR: $CR_NUMBER"
+              echo "approved=true" >> $GITHUB_OUTPUT
+              echo "cr-number=$CR_NUMBER" >> $GITHUB_OUTPUT
+            else
+              echo "ServiceNow Change Request $CR_NUMBER is not approved"
+              echo "Current status: $APPROVAL"
+              exit 1
+            fi
+          fi
 
   deploy-to-azure:
     name: 🚀 Deploy to Azure App Service
     runs-on: ubuntu-latest
-    needs: [build-and-test, mock-servicenow]
-    if: github.event_name == 'push' # Only runs on push (after merge)
+    needs: [build-and-test, verify-servicenow-approval]
+    if: github.event_name == 'push' && needs.verify-servicenow-approval.outputs.approved == 'true'
     
     steps:
       - name: Download Build Artifact
