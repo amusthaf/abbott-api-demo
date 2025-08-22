@@ -367,7 +367,7 @@ jobs:
             **Log Stream:** Available via Azure Portal
             
             ## Rollback Information
-            **Previous Version:** 1.0.${{ github.run_number | minus: 1 }}  
+            **Previous Version:** 1.0
             **Rollback Procedure:** Available via Azure Portal deployment slots  
             **Recovery Time Objective:** < 5 minutes
             
