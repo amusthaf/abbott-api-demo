@@ -198,8 +198,9 @@ jobs:
       run: |
         echo "🔧 Configuring API Management policies..."
         
-        # Set rate limiting policy
-        POLICY='<policies>
+        # Create policy XML content
+        cat > policy.xml << 'EOF'
+        <policies>
           <inbound>
             <rate-limit calls="100" renewal-period="60" />
             <cors allow-credentials="true">
@@ -217,15 +218,15 @@ jobs:
           </backend>
           <outbound />
           <on-error />
-        </policies>'
+        </policies>
+        EOF
         
-        # Apply the policy
-        echo "$POLICY" > policy.xml
-        az apim api policy import \
+        # Apply policy using the correct command structure
+        az apim policy create \
           --service-name "abbott-apim-demo" \
           --resource-group "abbott-demo-rg" \
-          --api-id "abbott-weather-api" \
-          --policy-file policy.xml
+          --policy-xml-path policy.xml \
+          --api-name "abbott-weather-api"
           
         echo "✅ API policies configured"
         
