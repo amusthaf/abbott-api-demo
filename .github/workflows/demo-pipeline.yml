@@ -301,76 +301,51 @@ jobs:
 
       - name: Update Confluence with Comprehensive Deployment Info
         run: |
+          # Test authentication first
+          echo "Testing Confluence authentication..."
+          curl -s -f \
+            "${{ secrets.CONFLUENCE_BASE_URL }}/wiki/rest/api/content/${{ secrets.CONFLUENCE_PAGE_ID }}" \
+            -H "Authorization: Basic $(echo -n '${{ secrets.CONFLUENCE_EMAIL }}:${{ secrets.CONFLUENCE_API_TOKEN }}' | base64)" \
+            || { echo "Authentication failed"; exit 1; }
+          
           # Get current page version
           CURRENT_VERSION=$(curl -s \
             "${{ secrets.CONFLUENCE_BASE_URL }}/wiki/rest/api/content/${{ secrets.CONFLUENCE_PAGE_ID }}?expand=version" \
             -H "Authorization: Basic $(echo -n '${{ secrets.CONFLUENCE_EMAIL }}:${{ secrets.CONFLUENCE_API_TOKEN }}' | base64)" \
-            | jq '.version.number')
+            | jq -r '.version.number')
           
+          echo "Current page version: $CURRENT_VERSION"
           NEW_VERSION=$((CURRENT_VERSION + 1))
+          echo "New version will be: $NEW_VERSION"
           
-          # Create Confluence storage format content
-          CONFLUENCE_CONTENT='<h1>Abbott Weather API - Deployment Report</h1>
+          # Create a temporary JSON file to avoid escaping issues
+          cat > confluence_payload.json << EOF
+          {
+            "version": {"number": $NEW_VERSION},
+            "title": "Abbott API Documentation",
+            "type": "page",
+            "body": {
+              "storage": {
+                "value": "<h1>Abbott Weather API - Deployment Report</h1><h2>Deployment Summary</h2><p><strong>Status:</strong> Completed Successfully</p><p><strong>Timestamp:</strong> ${{ steps.extended-info.outputs.deploy-time }}</p><p><strong>Version:</strong> ${{ steps.extended-info.outputs.version }}</p><p><strong>Build Number:</strong> ${{ steps.extended-info.outputs.build-number }}</p><p><strong>Deployed by:</strong> ${{ steps.extended-info.outputs.actor }}</p><h2>Infrastructure Details</h2><p><strong>App Service:</strong> ${{ env.AZURE_WEBAPP_NAME }}</p><p><strong>Region:</strong> Central India</p><p><strong>App Service URL:</strong> <a href=\"${{ steps.extended-info.outputs.app-service-url }}\">Live API</a></p><p><strong>API Gateway URL:</strong> <a href=\"${{ steps.extended-info.outputs.apim-gateway-url }}\">Gateway</a></p><h2>API Endpoints</h2><ul><li><a href=\"${{ steps.extended-info.outputs.app-service-url }}/health\">Health Check</a></li><li><a href=\"${{ steps.extended-info.outputs.app-service-url }}/swagger\">API Documentation</a></li><li>Weather Forecast: ${{ steps.extended-info.outputs.apim-gateway-url }}/api/Weather/forecast</li><li>Current Weather: ${{ steps.extended-info.outputs.apim-gateway-url }}/api/Weather/current/{city}</li></ul><p><em>Last updated: ${{ steps.extended-info.outputs.deploy-time }} by automated deployment pipeline</em></p>",
+                "representation": "storage"
+              }
+            }
+          }
+          EOF
           
-          <h2>Deployment Summary</h2>
-          <p><strong>Status:</strong> Completed Successfully<br/>
-          <strong>Timestamp:</strong> ${{ steps.extended-info.outputs.deploy-time }}<br/>
-          <strong>Version:</strong> ${{ steps.extended-info.outputs.version }}<br/>
-          <strong>Build Number:</strong> ${{ steps.extended-info.outputs.build-number }}<br/>
-          <strong>Deployed by:</strong> ${{ steps.extended-info.outputs.actor }}</p>
-          
-          <h2>Source Code Information</h2>
-          <p><strong>Repository:</strong> ${{ steps.extended-info.outputs.repository }}<br/>
-          <strong>Branch:</strong> ${{ steps.extended-info.outputs.branch }}<br/>
-          <strong>Commit SHA:</strong> ${{ steps.extended-info.outputs.commit-sha }}<br/>
-          <strong>Commit Author:</strong> ${{ steps.extended-info.outputs.commit-author }}<br/>
-          <strong>Commit Message:</strong> ${{ steps.extended-info.outputs.commit-message }}<br/>
-          <strong>GitHub Action:</strong> <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">View Build Details</a></p>
-          
-          <h2>Infrastructure Details</h2>
-          <p><strong>Azure Resource Group:</strong> ${{ steps.extended-info.outputs.resource-group }}<br/>
-          <strong>App Service:</strong> ${{ env.AZURE_WEBAPP_NAME }}<br/>
-          <strong>Region:</strong> Central India<br/>
-          <strong>App Service URL:</strong> ${{ steps.extended-info.outputs.app-service-url }}<br/>
-          <strong>API Gateway URL:</strong> ${{ steps.extended-info.outputs.apim-gateway-url }}</p>
-          
-          <h2>API Endpoints</h2>
-          <table>
-          <tr><th>Endpoint</th><th>URL</th><th>Purpose</th></tr>
-          <tr><td>Health Check</td><td><a href="${{ steps.extended-info.outputs.app-service-url }}/health">Link</a></td><td>Service health status</td></tr>
-          <tr><td>API Documentation</td><td><a href="${{ steps.extended-info.outputs.app-service-url }}/swagger">Link</a></td><td>Interactive API docs</td></tr>
-          <tr><td>Weather Forecast</td><td>${{ steps.extended-info.outputs.apim-gateway-url }}/api/Weather/forecast</td><td>5-day forecast</td></tr>
-          <tr><td>Current Weather</td><td>${{ steps.extended-info.outputs.apim-gateway-url }}/api/Weather/current/{city}</td><td>Current conditions</td></tr>
-          <tr><td>Test Endpoint</td><td>${{ steps.extended-info.outputs.apim-gateway-url }}/api/Weather/test</td><td>Connectivity test</td></tr>
-          </table>
-          
-          <h2>Quality Gates Passed</h2>
-          <ul>
-          <li>Code security analysis (CodeQL)</li>
-          <li>Unit test execution</li>
-          <li>Build compilation</li>
-          <li>Deployment health checks</li>
-          <li>API endpoint validation</li>
-          <li>APIM gateway configuration</li>
-          </ul>
-          
-          <p><em>Last updated: ${{ steps.extended-info.outputs.deploy-time }} by automated deployment pipeline</em></p>'
-          
-          # Update Confluence page
+          # Update Confluence page using the JSON file
           curl -X PUT \
             "${{ secrets.CONFLUENCE_BASE_URL }}/wiki/rest/api/content/${{ secrets.CONFLUENCE_PAGE_ID }}" \
             -H "Authorization: Basic $(echo -n '${{ secrets.CONFLUENCE_EMAIL }}:${{ secrets.CONFLUENCE_API_TOKEN }}' | base64)" \
             -H "Content-Type: application/json" \
-            -d "{
-              \"version\": {\"number\": $NEW_VERSION},
-              \"title\": \"Abbott API Documentation\",
-              \"type\": \"page\",
-              \"body\": {
-                \"storage\": {
-                  \"value\": \"$(echo "$CONFLUENCE_CONTENT" | sed 's/"/\\"/g' | tr -d '\n')\",
-                  \"representation\": \"storage\"
-                }
-              }
-            }"
-            
-          echo "Confluence page updated successfully"
+            -d @confluence_payload.json
+          
+          if [ $? -eq 0 ]; then
+            echo "✅ Confluence page updated successfully"
+          else
+            echo "❌ Failed to update Confluence page"
+            exit 1
+          fi
+          
+          # Clean up
+          rm confluence_payload.json
