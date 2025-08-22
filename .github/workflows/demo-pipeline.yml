@@ -301,24 +301,49 @@ jobs:
 
       - name: Update Confluence with Comprehensive Deployment Info
         run: |
-          # Test authentication first
-          echo "Testing Confluence authentication..."
-          curl -s -f \
-            "${{ secrets.CONFLUENCE_BASE_URL }}/wiki/rest/api/content/${{ secrets.CONFLUENCE_PAGE_ID }}" \
-            -H "Authorization: Basic $(echo -n '${{ secrets.CONFLUENCE_EMAIL }}:${{ secrets.CONFLUENCE_API_TOKEN }}' | base64)" \
-            || { echo "Authentication failed"; exit 1; }
+          # Create credentials for Confluence API
+          CONFLUENCE_USER="ahamed.musthafa@agilisium.com"
+          CONFLUENCE_TOKEN="${{ secrets.CONFLUENCE_API_TOKEN }}"
+          CONFLUENCE_URL="${{ secrets.CONFLUENCE_BASE_URL }}"
+          PAGE_ID="${{ secrets.CONFLUENCE_PAGE_ID }}"
           
           # Get current page version
+          echo "Getting current page version..."
           CURRENT_VERSION=$(curl -s \
-            "${{ secrets.CONFLUENCE_BASE_URL }}/wiki/rest/api/content/${{ secrets.CONFLUENCE_PAGE_ID }}?expand=version" \
-            -H "Authorization: Basic $(echo -n '${{ secrets.CONFLUENCE_EMAIL }}:${{ secrets.CONFLUENCE_API_TOKEN }}' | base64)" \
-            | jq -r '.version.number')
+            -u "$CONFLUENCE_USER:$CONFLUENCE_TOKEN" \
+            "$CONFLUENCE_URL/wiki/rest/api/content/$PAGE_ID?expand=version" \
+            | jq '.version.number')
           
           echo "Current page version: $CURRENT_VERSION"
           NEW_VERSION=$((CURRENT_VERSION + 1))
           echo "New version will be: $NEW_VERSION"
           
-          # Create a temporary JSON file to avoid escaping issues
+          # Create Confluence storage format content
+          CONFLUENCE_CONTENT='<h1>Abbott Weather API - Deployment Report</h1>
+          <h2>Deployment Summary</h2>
+          <p><strong>Status:</strong> Completed Successfully<br/>
+          <strong>Timestamp:</strong> ${{ steps.extended-info.outputs.deploy-time }}<br/>
+          <strong>Version:</strong> ${{ steps.extended-info.outputs.version }}<br/>
+          <strong>Build Number:</strong> ${{ steps.extended-info.outputs.build-number }}<br/>
+          <strong>Deployed by:</strong> ${{ steps.extended-info.outputs.actor }}</p>
+          
+          <h2>Infrastructure Details</h2>
+          <p><strong>App Service:</strong> ${{ env.AZURE_WEBAPP_NAME }}<br/>
+          <strong>Region:</strong> Central India<br/>
+          <strong>App Service URL:</strong> <a href="${{ steps.extended-info.outputs.app-service-url }}">Live API</a><br/>
+          <strong>API Gateway URL:</strong> <a href="${{ steps.extended-info.outputs.apim-gateway-url }}">Gateway</a></p>
+          
+          <h2>API Endpoints</h2>
+          <ul>
+          <li><a href="${{ steps.extended-info.outputs.app-service-url }}/health">Health Check</a></li>
+          <li><a href="${{ steps.extended-info.outputs.app-service-url }}/swagger">API Documentation</a></li>
+          <li>Weather Forecast: ${{ steps.extended-info.outputs.apim-gateway-url }}/api/Weather/forecast</li>
+          <li>Current Weather: ${{ steps.extended-info.outputs.apim-gateway-url }}/api/Weather/current/{city}</li>
+          </ul>
+          
+          <p><em>Last updated: ${{ steps.extended-info.outputs.deploy-time }} by automated deployment pipeline</em></p>'
+          
+          # Create JSON payload file to avoid escaping issues
           cat > confluence_payload.json << EOF
           {
             "version": {"number": $NEW_VERSION},
@@ -326,24 +351,28 @@ jobs:
             "type": "page",
             "body": {
               "storage": {
-                "value": "<h1>Abbott Weather API - Deployment Report</h1><h2>Deployment Summary</h2><p><strong>Status:</strong> Completed Successfully</p><p><strong>Timestamp:</strong> ${{ steps.extended-info.outputs.deploy-time }}</p><p><strong>Version:</strong> ${{ steps.extended-info.outputs.version }}</p><p><strong>Build Number:</strong> ${{ steps.extended-info.outputs.build-number }}</p><p><strong>Deployed by:</strong> ${{ steps.extended-info.outputs.actor }}</p><h2>Infrastructure Details</h2><p><strong>App Service:</strong> ${{ env.AZURE_WEBAPP_NAME }}</p><p><strong>Region:</strong> Central India</p><p><strong>App Service URL:</strong> <a href=\"${{ steps.extended-info.outputs.app-service-url }}\">Live API</a></p><p><strong>API Gateway URL:</strong> <a href=\"${{ steps.extended-info.outputs.apim-gateway-url }}\">Gateway</a></p><h2>API Endpoints</h2><ul><li><a href=\"${{ steps.extended-info.outputs.app-service-url }}/health\">Health Check</a></li><li><a href=\"${{ steps.extended-info.outputs.app-service-url }}/swagger\">API Documentation</a></li><li>Weather Forecast: ${{ steps.extended-info.outputs.apim-gateway-url }}/api/Weather/forecast</li><li>Current Weather: ${{ steps.extended-info.outputs.apim-gateway-url }}/api/Weather/current/{city}</li></ul><p><em>Last updated: ${{ steps.extended-info.outputs.deploy-time }} by automated deployment pipeline</em></p>",
+                "value": $(echo "$CONFLUENCE_CONTENT" | jq -Rs .),
                 "representation": "storage"
               }
             }
           }
           EOF
           
-          # Update Confluence page using the JSON file
-          curl -X PUT \
-            "${{ secrets.CONFLUENCE_BASE_URL }}/wiki/rest/api/content/${{ secrets.CONFLUENCE_PAGE_ID }}" \
-            -H "Authorization: Basic $(echo -n '${{ secrets.CONFLUENCE_EMAIL }}:${{ secrets.CONFLUENCE_API_TOKEN }}' | base64)" \
+          # Update Confluence page
+          echo "Updating Confluence page..."
+          RESPONSE=$(curl -w "%{http_code}" -s \
+            -u "$CONFLUENCE_USER:$CONFLUENCE_TOKEN" \
+            -X PUT \
             -H "Content-Type: application/json" \
-            -d @confluence_payload.json
+            -d @confluence_payload.json \
+            "$CONFLUENCE_URL/wiki/rest/api/content/$PAGE_ID")
           
-          if [ $? -eq 0 ]; then
-            echo "✅ Confluence page updated successfully"
+          HTTP_CODE="${RESPONSE: -3}"
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "Confluence page updated successfully"
           else
-            echo "❌ Failed to update Confluence page"
+            echo "Failed to update Confluence page. HTTP code: $HTTP_CODE"
+            echo "Response: ${RESPONSE%???}"
             exit 1
           fi
           
