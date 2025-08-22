@@ -44,7 +44,6 @@ jobs:
           echo "🔍 Running dependency vulnerability scan..."
           dotnet list ./src/WeatherAPI package --vulnerable --include-transitive || true
           echo "✅ Security scan completed"
-    continue-on-error: true
 
   build-and-test:
     name: 🔨 Build & Test
@@ -89,15 +88,14 @@ jobs:
         with:
           name: webapp-artifact-${{ steps.version.outputs.version }}
           path: ./publish
-    continue-on-error: true
 
   mock-servicenow:
     name: 📋 ServiceNow Change Management
     runs-on: ubuntu-latest
     needs: build-and-test
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
-    outputs:
-      sr-number: ${{ steps.create-sr.outputs.sr-number }}
+    # if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    # outputs:
+    #   sr-number: ${{ steps.create-sr.outputs.sr-number }}
     
     steps:
       - name: Create ServiceNow Change Request
