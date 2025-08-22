@@ -93,9 +93,8 @@ jobs:
     name: 📋 ServiceNow Change Management
     runs-on: ubuntu-latest
     needs: build-and-test
-    # if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
-    # outputs:
-    #   sr-number: ${{ steps.create-sr.outputs.sr-number }}
+    outputs:
+      sr-number: ${{ steps.create-sr.outputs.sr-number }}
     
     steps:
       - name: Create ServiceNow Change Request
@@ -132,7 +131,6 @@ jobs:
     name: 🚀 Deploy to Azure App Service
     runs-on: ubuntu-latest
     needs: [build-and-test, mock-servicenow]
-    # if: github.ref == 'refs/heads/main'
     
     steps:
       - name: Download Build Artifact
@@ -172,20 +170,77 @@ jobs:
     name: 🌐 Update API Management
     runs-on: ubuntu-latest
     needs: deploy-to-azure
-    
+
     steps:
-      - name: Update Azure APIM
-        run: |
-          echo "🌐 Updating Azure API Management..."
-          echo "📝 Importing OpenAPI specification from deployed service"
-          echo "🔄 Updating API policies and rate limiting rules"
-          echo "🚪 Configuring API gateway routing"
-          echo "📚 Updating developer portal documentation"
-          echo "✅ APIM configuration updated successfully"
-          echo ""
-          echo "🔗 API Gateway Endpoints:"
-          echo "  🌍 Public API: https://abbott-apim.azure-api.net/weather"
-          echo "  📖 Developer Portal: https://abbott-apim.developer.azure-api.net"
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        
+    - name: Import API to APIM
+      run: |
+        echo "🌐 Importing API to Azure API Management..."
+        
+        # Import the API from your App Service OpenAPI spec
+        az apim api import \
+          --api-id "abbott-weather-api" \
+          --service-name "abbott-apim-demo" \
+          --resource-group "abbott-demo-rg" \
+          --specification-format "OpenApi" \
+          --specification-url "https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net/swagger/v1/swagger.json" \
+          --path "weather" \
+          --display-name "Abbott Weather API" \
+          --protocols "https"
+          
+        echo "✅ API imported to APIM successfully"
+        
+    - name: Configure API Policies
+      run: |
+        echo "🔧 Configuring API Management policies..."
+        
+        # Set rate limiting policy
+        POLICY='<policies>
+          <inbound>
+            <rate-limit calls="100" renewal-period="60" />
+            <cors allow-credentials="true">
+              <allowed-origins>
+                <origin>*</origin>
+              </allowed-origins>
+              <allowed-methods>
+                <method>GET</method>
+                <method>POST</method>
+              </allowed-methods>
+            </cors>
+          </inbound>
+          <backend>
+            <forward-request />
+          </backend>
+          <outbound />
+          <on-error />
+        </policies>'
+        
+        # Apply the policy
+        echo "$POLICY" > policy.xml
+        az apim api policy import \
+          --service-name "abbott-apim-demo" \
+          --resource-group "abbott-demo-rg" \
+          --api-id "abbott-weather-api" \
+          --policy-file policy.xml
+          
+        echo "✅ API policies configured"
+        
+    - name: APIM Deployment Summary
+      run: |
+        echo "🎉 API Management Configuration Complete!"
+        echo ""
+        echo "🔗 APIM Gateway URL: https://abbott-apim-demo.azure-api.net/weather"
+        echo "📚 Developer Portal: https://abbott-apim-demo.developer.azure-api.net"
+        echo "📊 Management Portal: https://abbott-apim-demo.management.azure-api.net"
+        echo ""
+        echo "📋 Available Endpoints via APIM:"
+        echo "  GET /weather/forecast - Weather forecast"
+        echo "  GET /weather/current/{city} - Current weather"
+        echo "  GET /weather/test - Test endpoint"
 
   deployment-summary:
     name: 📢 Deployment Complete
