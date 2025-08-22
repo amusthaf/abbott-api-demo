@@ -1,160 +1,78 @@
 using Microsoft.AspNetCore.Mvc;
-using System;
-using System.Linq;
+using Microsoft.Extensions.Logging;
+using Moq;
+using WeatherAPI.Controllers;
+using Xunit;
 
-namespace WeatherAPI.Controllers;
+namespace WeatherAPI.Tests;
 
-[ApiController]
-[Route("api/[controller]")]
-[Produces("application/json")]
-public class WeatherController : ControllerBase
+public class WeatherControllerTests
 {
-    private static readonly string[] Summaries = new[]
-    {
-        "Freezing", "Bracing", "Chilly", "Cool", "Mild", 
-        "Warm", "Balmy", "Hot", "Sweltering", "Scorching", "Raining"
-    };
+    private readonly Mock<ILogger<WeatherController>> _mockLogger;
+    private readonly WeatherController _controller;
 
-    private readonly ILogger<WeatherController> _logger;
-
-    public WeatherController(ILogger<WeatherController> logger)
+    public WeatherControllerTests()
     {
-        _logger = logger;
+        _mockLogger = new Mock<ILogger<WeatherController>>();
+        _controller = new WeatherController(_mockLogger.Object);
     }
 
-    /// <summary>
-    /// Get weather forecast for the next 5 days
-    /// </summary>
-    /// <returns>Weather forecast data</returns>
-    [HttpGet("forecast")]
-    [ProducesResponseType(typeof(object), 200)]
-    public IActionResult GetWeatherForecast()
+    [Fact]
+    public void GetWeatherForecast_ReturnsOkResult_WithForecastData()
     {
-        try
-        {
-            _logger.LogInformation("Getting weather forecast - Abbott API Demo");
-            
-            var forecasts = Enumerable.Range(1, 5).Select(index => new
-            {
-                Date = DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-                TemperatureC = Random.Shared.Next(-20, 55),
-                TemperatureF = 32 + (int)(Random.Shared.Next(-20, 55) / 0.5556),
-                Summary = Summaries[Random.Shared.Next(Summaries.Length)]
-            }).ToArray();
+        // Act
+        var result = _controller.GetWeatherForecast();
 
-            return Ok(new
-            {
-                Status = "Success",
-                Message = "Abbott Weather API - Modernization Demo",
-                Data = forecasts,
-                Timestamp = DateTime.UtcNow,
-                Version = "1.0.0",
-                Pipeline = "GitHub Actions",
-                Environment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error retrieving weather forecast");
-            return StatusCode(500, new { Error = "Internal server error", Message = ex.Message });
-        }
+        // Assert
+        var okResult = Assert.IsType<OkObjectResult>(result);
+        Assert.NotNull(okResult.Value);
+        Assert.Equal(200, okResult.StatusCode);
     }
 
-    /// <summary>
-    /// Get current weather for a specific city
-    /// </summary>
-    /// <param name="city">City name</param>
-    /// <returns>Current weather data</returns>
-    [HttpGet("current/{city}")]
-    [ProducesResponseType(typeof(object), 200)]
-    [ProducesResponseType(400)]
-    public IActionResult GetCurrentWeather(string city)
+    [Fact]
+    public void GetCurrentWeather_WithValidCity_ReturnsOkResult()
     {
-        try
-        {
-            _logger.LogInformation("Getting current weather for city: {City}", city);
+        // Arrange
+        var cityName = "Chicago";
 
-            if (string.IsNullOrEmpty(city))
-            {
-                return BadRequest(new { Error = "City name is required" });
-            }
+        // Act
+        var result = _controller.GetCurrentWeather(cityName);
 
-            var currentWeather = new
-            {
-                Date = DateOnly.FromDateTime(DateTime.Now),
-                TemperatureC = Random.Shared.Next(-20, 55),
-                TemperatureF = 32 + (int)(Random.Shared.Next(-20, 55) / 0.5556),
-                Summary = Summaries[Random.Shared.Next(Summaries.Length)],
-                City = city,
-                Country = "Demo"
-            };
-
-            return Ok(new
-            {
-                Status = "Success",
-                Message = $"Current weather for {city} - Abbott API Demo",
-                Data = currentWeather,
-                Timestamp = DateTime.UtcNow,
-                Source = "Abbott Modernized API Platform"
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error retrieving weather for city: {City}", city);
-            return StatusCode(500, new { Error = "Internal server error" });
-        }
+        // Assert
+        var okResult = Assert.IsType<OkObjectResult>(result);
+        Assert.NotNull(okResult.Value);
+        Assert.Equal(200, okResult.StatusCode);
     }
 
-    /// <summary>
-    /// API health check endpoint
-    /// </summary>
-    [HttpGet("api-health")]
-    [ProducesResponseType(200)]
-    public IActionResult HealthCheck()
+    [Fact]
+    public void GetCurrentWeather_WithEmptyCity_ReturnsBadRequest()
     {
-        return Ok(new
-        {
-            Status = "Healthy",
-            Timestamp = DateTime.UtcNow,
-            Service = "Abbott Weather API",
-            Version = "1.0.0",
-            Environment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production",
-            Message = "Abbott API modernization platform is operational",
-            Uptime = "Demo Mode",
-            Pipeline = "GitHub Actions CI/CD"
-        });
+        // Act
+        var result = _controller.GetCurrentWeather("");
+
+        // Assert
+        Assert.IsType<BadRequestObjectResult>(result);
     }
 
-    /// <summary>
-    /// Demo endpoint to show API modernization benefits
-    /// </summary>
-    [HttpGet("demo-info")]
-    [ProducesResponseType(200)]
-    public IActionResult GetDemoInfo()
+    [Fact]
+    public void HealthCheck_ReturnsOkResult()
     {
-        return Ok(new
-        {
-            Project = "Abbott API Modernization",
-            Platform = "Azure App Service + API Management",
-            Pipeline = "GitHub Actions",
-            Features = new[]
-            {
-                "Automated CI/CD Pipeline",
-                "Security Scanning (CodeQL)",
-                "ServiceNow Integration",
-                "Multi-environment Deployment",
-                "API Management Gateway",
-                "Complete Audit Trail"
-            },
-            Benefits = new[]
-            {
-                "Faster Time to Market",
-                "Enhanced Security",
-                "Automated Governance",
-                "Improved Developer Experience",
-                "Better Operational Visibility"
-            },
-            Timestamp = DateTime.UtcNow
-        });
+        // Act
+        var result = _controller.HealthCheck();
+
+        // Assert
+        var okResult = Assert.IsType<OkObjectResult>(result);
+        Assert.Equal(200, okResult.StatusCode);
+    }
+
+    [Fact]
+    public void GetDemoInfo_ReturnsOkResult()
+    {
+        // Act
+        var result = _controller.GetDemoInfo();
+
+        // Assert
+        var okResult = Assert.IsType<OkObjectResult>(result);
+        Assert.Equal(200, okResult.StatusCode);
     }
 }
