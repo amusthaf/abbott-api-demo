@@ -145,49 +145,84 @@ jobs:
       - name: Check ServiceNow Approval Status
         id: check-approval
         run: |
-          echo "Looking for ServiceNow Change Request for commit ${{ github.sha }}"
+          echo "🔍 Looking for ServiceNow Change Request..."
           
-          # Query ServiceNow for change request with this commit SHA
+          # Method 1: Try to find CR by current commit SHA (direct push case)
+          echo "Searching for CR with commit SHA: ${{ github.sha }}"
           RESPONSE=$(curl -s \
             -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
             "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request?sysparm_query=u_commit_sha=${{ github.sha }}")
           
           CR_COUNT=$(echo "$RESPONSE" | jq '.result | length')
           
+          # Method 2: If not found, search by PR number in description (merged PR case)
           if [ "$CR_COUNT" -eq 0 ]; then
-            echo "No ServiceNow Change Request found. Creating emergency CR..."
-            EMERGENCY_RESPONSE=$(curl -s -X POST \
-              -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
-              -H "Content-Type: application/json" \
-              -d '{
-                "short_description": "Emergency Deploy - Direct Push",
-                "description": "Direct push deployment\nCommit: ${{ github.sha }}",
-                "category": "Software",
-                "priority": "2",
-                "state": "3",
-                "approval": "approved",
-                "u_commit_sha": "${{ github.sha }}"
-              }' \
-              "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request")
+            echo "No CR found for current commit. Searching for recent CRs by repository..."
             
-            CR_NUMBER=$(echo "$EMERGENCY_RESPONSE" | jq -r '.result.number')
-            CR_SYS_ID=$(echo "$EMERGENCY_RESPONSE" | jq -r '.result.sys_id')
-            echo "approved=true" >> $GITHUB_OUTPUT
-            echo "cr-number=$CR_NUMBER" >> $GITHUB_OUTPUT
-            echo "cr-sys-id=$CR_SYS_ID" >> $GITHUB_OUTPUT
+            # Get recent change requests for this repository (last 24 hours)
+            YESTERDAY=$(date -u -d '24 hours ago' '+%Y-%m-%d %H:%M:%S')
+            RESPONSE=$(curl -s \
+              -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+              "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request?sysparm_query=descriptionCONTAINSRepository: ${{ github.repository }}^sys_created_on>=$YESTERDAY^ORDERBYDESCsys_created_on")
+            
+            CR_COUNT=$(echo "$RESPONSE" | jq '.result | length')
+            echo "Found $CR_COUNT recent CR(s) for this repository"
+          fi
+          
+          # Method 3: Search by branch-specific pattern if still not found
+          if [ "$CR_COUNT" -eq 0 ]; then
+            echo "Searching for CR by branch reference..."
+            BRANCH_NAME="${GITHUB_REF#refs/heads/}"
+            RESPONSE=$(curl -s \
+              -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+              "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request?sysparm_query=descriptionCONTAINS$BRANCH_NAME^sys_created_on>=2024-01-01^ORDERBYDESCsys_created_on&sysparm_limit=5")
+            
+            CR_COUNT=$(echo "$RESPONSE" | jq '.result | length')
+          fi
+          
+          if [ "$CR_COUNT" -eq 0 ]; then
+            echo "❌ ERROR: No ServiceNow Change Request found!"
+            echo "This suggests either:"
+            echo "1. No PR was created for this push"
+            echo "2. ServiceNow CR was not properly created"
+            echo "3. This is a direct push without proper process"
+            echo ""
+            echo "🚨 BLOCKING DEPLOYMENT - No valid Change Request found"
+            echo "Please create a PR and get ServiceNow approval before deploying."
+            exit 1
+            
           else
+            # Use the most recent CR
             CR_NUMBER=$(echo "$RESPONSE" | jq -r '.result[0].number')
             CR_SYS_ID=$(echo "$RESPONSE" | jq -r '.result[0].sys_id')
             APPROVAL=$(echo "$RESPONSE" | jq -r '.result[0].approval')
+            CR_STATE=$(echo "$RESPONSE" | jq -r '.result[0].state')
             
-            if [ "$APPROVAL" = "approved" ]; then
+            echo "🔍 Found Change Request: $CR_NUMBER"
+            echo "📋 Approval Status: $APPROVAL"
+            echo "📊 State: $CR_STATE"
+            
+            if [ "$APPROVAL" = "approved" ] || [ "$CR_STATE" = "3" ]; then
               echo "✅ ServiceNow approval verified for CR: $CR_NUMBER"
               echo "approved=true" >> $GITHUB_OUTPUT
               echo "cr-number=$CR_NUMBER" >> $GITHUB_OUTPUT
               echo "cr-sys-id=$CR_SYS_ID" >> $GITHUB_OUTPUT
+              
+              # Update the CR with the actual deployed commit SHA
+              echo "🔄 Updating CR with merge commit SHA..."
+              curl -s -X PUT \
+                -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+                -H "Content-Type: application/json" \
+                -d "{\"u_deployed_commit_sha\": \"${{ github.sha }}\"}" \
+                "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/$CR_SYS_ID"
+              
             else
               echo "❌ ServiceNow Change Request $CR_NUMBER is not approved"
-              echo "Current status: $APPROVAL"
+              echo "Current approval status: $APPROVAL"
+              echo "Current state: $CR_STATE"
+              echo ""
+              echo "🚨 BLOCKING DEPLOYMENT - CR requires approval"
+              echo "Please approve CR $CR_NUMBER in ServiceNow before proceeding."
               exit 1
             fi
           fi
