@@ -145,87 +145,71 @@ jobs:
       - name: Check ServiceNow Approval Status
         id: check-approval
         run: |
-          echo "🔍 Looking for ServiceNow Change Request..."
+          echo "🔍 Looking for ServiceNow Change Request for this deployment..."
           
-          # Method 1: Try to find CR by current commit SHA (direct push case)
-          echo "Searching for CR with commit SHA: ${{ github.sha }}"
+          # PRIORITY 1: Search for recent approved CRs for this repository
+          # This is more reliable than relying on commit SHA matching
+          echo "🔎 Searching for recent approved CRs for repository: ${{ github.repository }}"
+          
+          # Get approved CRs from last 48 hours for this repository
           RESPONSE=$(curl -s \
             -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
-            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request?sysparm_query=u_commit_sha=${{ github.sha }}")
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request?sysparm_query=short_descriptionCONTAINSAbbott Weather API^approval=approved^sys_created_on>=javascript:gs.daysAgoStart(2)^ORDERBYDESCsys_created_on&sysparm_limit=5")
           
           CR_COUNT=$(echo "$RESPONSE" | jq '.result | length')
+          echo "📊 Found $CR_COUNT approved CR(s) for Abbott Weather API in last 48 hours"
           
-          # Method 2: If not found, search by PR number in description (merged PR case)
-          if [ "$CR_COUNT" -eq 0 ]; then
-            echo "No CR found for current commit. Searching for recent CRs by repository..."
-            
-            # Get recent change requests for this repository (last 24 hours)
-            YESTERDAY=$(date -u -d '24 hours ago' '+%Y-%m-%d %H:%M:%S')
-            RESPONSE=$(curl -s \
-              -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
-              "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request?sysparm_query=descriptionCONTAINSRepository: ${{ github.repository }}^sys_created_on>=$YESTERDAY^ORDERBYDESCsys_created_on")
-            
-            CR_COUNT=$(echo "$RESPONSE" | jq '.result | length')
-            echo "Found $CR_COUNT recent CR(s) for this repository"
-          fi
-          
-          # Method 3: Search by branch-specific pattern if still not found
-          if [ "$CR_COUNT" -eq 0 ]; then
-            echo "Searching for CR by branch reference..."
-            BRANCH_NAME="${GITHUB_REF#refs/heads/}"
-            RESPONSE=$(curl -s \
-              -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
-              "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request?sysparm_query=descriptionCONTAINS$BRANCH_NAME^sys_created_on>=2024-01-01^ORDERBYDESCsys_created_on&sysparm_limit=5")
-            
-            CR_COUNT=$(echo "$RESPONSE" | jq '.result | length')
-          fi
-          
-          if [ "$CR_COUNT" -eq 0 ]; then
-            echo "❌ ERROR: No ServiceNow Change Request found!"
-            echo "This suggests either:"
-            echo "1. No PR was created for this push"
-            echo "2. ServiceNow CR was not properly created"
-            echo "3. This is a direct push without proper process"
-            echo ""
-            echo "🚨 BLOCKING DEPLOYMENT - No valid Change Request found"
-            echo "Please create a PR and get ServiceNow approval before deploying."
-            exit 1
-            
-          else
-            # Use the most recent CR
+          if [ "$CR_COUNT" -gt 0 ]; then
+            # Use the most recent approved CR
             CR_NUMBER=$(echo "$RESPONSE" | jq -r '.result[0].number')
             CR_SYS_ID=$(echo "$RESPONSE" | jq -r '.result[0].sys_id')
             APPROVAL=$(echo "$RESPONSE" | jq -r '.result[0].approval')
             CR_STATE=$(echo "$RESPONSE" | jq -r '.result[0].state')
+            SHORT_DESC=$(echo "$RESPONSE" | jq -r '.result[0].short_description')
             
-            echo "🔍 Found Change Request: $CR_NUMBER"
-            echo "📋 Approval Status: $APPROVAL"
+            echo "✅ Found approved Change Request: $CR_NUMBER"
+            echo "📝 Description: $SHORT_DESC"
+            echo "✔️  Approval Status: $APPROVAL"
             echo "📊 State: $CR_STATE"
             
-            if [ "$APPROVAL" = "approved" ] || [ "$CR_STATE" = "3" ]; then
-              echo "✅ ServiceNow approval verified for CR: $CR_NUMBER"
+            # Verify it's actually approved
+            if [ "$APPROVAL" = "approved" ]; then
+              echo "🎉 ServiceNow approval verified for CR: $CR_NUMBER"
               echo "approved=true" >> $GITHUB_OUTPUT
               echo "cr-number=$CR_NUMBER" >> $GITHUB_OUTPUT
               echo "cr-sys-id=$CR_SYS_ID" >> $GITHUB_OUTPUT
               
-              # Update the CR with the actual deployed commit SHA
-              echo "🔄 Updating CR with merge commit SHA..."
+              # Update the CR with deployment info
+              echo "📝 Updating CR with deployment details..."
               curl -s -X PUT \
                 -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
                 -H "Content-Type: application/json" \
-                -d "{\"u_deployed_commit_sha\": \"${{ github.sha }}\"}" \
+                -d "{
+                  \"u_deployed_commit_sha\": \"${{ github.sha }}\",
+                  \"work_notes\": \"Deployment started for commit ${{ github.sha }}\\nBranch: ${GITHUB_REF#refs/heads/}\\nTriggered by: ${{ github.actor }}\\nWorkflow: ${{ github.run_id }}\"
+                }" \
                 "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/$CR_SYS_ID"
               
+              echo "✅ Using approved CR: $CR_NUMBER for deployment"
+              
             else
-              echo "❌ ServiceNow Change Request $CR_NUMBER is not approved"
-              echo "Current approval status: $APPROVAL"
-              echo "Current state: $CR_STATE"
-              echo ""
+              echo "❌ Found CR $CR_NUMBER but it's not approved (status: $APPROVAL)"
               echo "🚨 BLOCKING DEPLOYMENT - CR requires approval"
-              echo "Please approve CR $CR_NUMBER in ServiceNow before proceeding."
               exit 1
             fi
+            
+          else
+            echo "❌ No approved ServiceNow Change Request found for Abbott Weather API"
+            echo "🔍 Available options:"
+            echo "1. Ensure a PR was created and CR was approved"
+            echo "2. Check if CR exists but description doesn't match 'Abbott Weather API'"
+            echo "3. Verify approval was completed in ServiceNow"
+            echo ""
+            echo "🚨 BLOCKING DEPLOYMENT - No valid approved Change Request found"
+            exit 1
           fi
+          
+          echo "🎯 ServiceNow verification completed successfully!"
 
   deploy-to-azure:
     name: 🚀 Deploy to Azure App Service
