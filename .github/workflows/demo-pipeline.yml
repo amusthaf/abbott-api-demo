@@ -115,20 +115,52 @@ jobs:
           if [ "$CR_COUNT" -gt 0 ]; then
             CR_NUMBER=$(echo "$RESPONSE" | jq -r '.result[0].number')
             CR_SYS_ID=$(echo "$RESPONSE" | jq -r '.result[0].sys_id')
-            APPROVAL=$(echo "$RESPONSE" | jq -r '.result[0].approval')
+            CR_STATE=$(echo "$RESPONSE" | jq -r '.result[0].state')
             
             echo "✅ Found Change Request: $CR_NUMBER"
-            echo "✔️ Approval Status: $APPROVAL"
+            echo "📊 State: $CR_STATE"
             
-            if [ "$APPROVAL" = "approved" ]; then
-              echo "🎉 ServiceNow approval verified for CR: $CR_NUMBER"
-              echo "approved=true" >> $GITHUB_OUTPUT
-              echo "cr-number=$CR_NUMBER" >> $GITHUB_OUTPUT
-              echo "cr-sys-id=$CR_SYS_ID" >> $GITHUB_OUTPUT
+            # Check approvals for this CR
+            APPROVAL_RESPONSE=$(curl -s \
+              -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+              "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/sysapproval_approver?sysparm_query=document_id=$CR_SYS_ID")
+            
+            APPROVAL_COUNT=$(echo "$APPROVAL_RESPONSE" | jq '.result | length')
+            echo "🔍 Found $APPROVAL_COUNT approval record(s)"
+            
+            if [ "$APPROVAL_COUNT" -gt 0 ]; then
+              # Check if any approvals are in "approved" state
+              APPROVED_COUNT=$(echo "$APPROVAL_RESPONSE" | jq '[.result[] | select(.state == "approved")] | length')
+              REJECTED_COUNT=$(echo "$APPROVAL_RESPONSE" | jq '[.result[] | select(.state == "rejected")] | length')
+              
+              echo "📊 Approved: $APPROVED_COUNT, Rejected: $REJECTED_COUNT"
+              
+              if [ "$REJECTED_COUNT" -gt 0 ]; then
+                echo "❌ Change Request has rejected approvals"
+                echo "🚨 BLOCKING DEPLOYMENT - CR has rejections"
+                exit 1
+              elif [ "$APPROVED_COUNT" -gt 0 ]; then
+                echo "🎉 ServiceNow approval(s) verified for CR: $CR_NUMBER"
+                echo "approved=true" >> $GITHUB_OUTPUT
+                echo "cr-number=$CR_NUMBER" >> $GITHUB_OUTPUT
+                echo "cr-sys-id=$CR_SYS_ID" >> $GITHUB_OUTPUT
+              else
+                echo "⏳ Change Request approvals are still pending"
+                echo "🚨 BLOCKING DEPLOYMENT - CR requires approval"
+                exit 1
+              fi
             else
-              echo "❌ CR $CR_NUMBER is not approved (status: $APPROVAL)"
-              echo "🚨 BLOCKING DEPLOYMENT - CR requires approval"
-              exit 1
+              # Fallback: Check CR state for auto-approved or closed states
+              if [ "$CR_STATE" = "3" ] || [ "$CR_STATE" = "6" ]; then
+                echo "🎉 ServiceNow CR in approved/closed state: $CR_NUMBER"
+                echo "approved=true" >> $GITHUB_OUTPUT
+                echo "cr-number=$CR_NUMBER" >> $GITHUB_OUTPUT
+                echo "cr-sys-id=$CR_SYS_ID" >> $GITHUB_OUTPUT
+              else
+                echo "❌ No approvals found and CR not in approved state"
+                echo "🚨 BLOCKING DEPLOYMENT - CR requires approval"
+                exit 1
+              fi
             fi
           else
             echo "❌ No ServiceNow Change Request found for PR #${{ github.event.number }}"
