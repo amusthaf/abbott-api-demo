@@ -1,10 +1,9 @@
 name: Abbott API Demo Pipeline
 
 on:
-  push:
-    branches: [ main, dev ]
   pull_request:
     branches: [ main, dev ]
+    types: [opened, synchronize, reopened, closed]
 
 permissions:
   issues: write
@@ -20,6 +19,7 @@ jobs:
   security-scan:
     name: 🔒 Security & Code Quality
     runs-on: ubuntu-latest
+    if: github.event.action != 'closed'
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -41,15 +41,101 @@ jobs:
           dotnet list ./src/WeatherAPI package --vulnerable --include-transitive || true
           echo "✅ Security scan completed"
 
-  build-and-test:
-    name: 🔨 Build & Test
+  create-servicenow-cr:
+    name: 📋 Create ServiceNow Change Request
     runs-on: ubuntu-latest
     needs: security-scan
-    if: github.event_name == 'push'
+    if: github.event.action == 'opened' || github.event.action == 'reopened'
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      cr-number: ${{ steps.create-cr.outputs.cr-number }}
+      cr-sys-id: ${{ steps.create-cr.outputs.cr-sys-id }}
     
     steps:
+      - name: Create ServiceNow Change Request
+        id: create-cr
+        run: |
+          echo "Creating ServiceNow Change Request..."
+          
+          RESPONSE=$(curl -s -X POST \
+            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "short_description": "Deploy Abbott Weather API - PR #${{ github.event.number }}",
+              "description": "Automated deployment request\nRepository: ${{ github.repository }}\nPR: ${{ github.event.pull_request.title }}\nBranch: ${{ github.event.pull_request.head.ref }}\nAuthor: ${{ github.event.pull_request.user.login }}\nCommit: ${{ github.event.pull_request.head.sha }}\nPR URL: ${{ github.event.pull_request.html_url }}",
+              "category": "Software",
+              "priority": "3",
+              "risk": "3",
+              "state": "1",
+              "type": "normal",
+              "u_commit_sha": "${{ github.event.pull_request.head.sha }}",
+              "u_pr_number": "${{ github.event.number }}"
+            }' \
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request")
+          
+          CR_NUMBER=$(echo "$RESPONSE" | jq -r '.result.number')
+          CR_SYS_ID=$(echo "$RESPONSE" | jq -r '.result.sys_id')
+          
+          echo "cr-number=$CR_NUMBER" >> $GITHUB_OUTPUT
+          echo "cr-sys-id=$CR_SYS_ID" >> $GITHUB_OUTPUT
+          
+          echo "✅ ServiceNow Change Request created: $CR_NUMBER"
+
+          # Add comment to PR
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"body\": \"📋 **ServiceNow Change Request Created**\n\n- **Change Request**: [$CR_NUMBER](${{ secrets.SERVICENOW_INSTANCE }}/nav_to.do?uri=change_request.do?sys_id=$CR_SYS_ID)\n- **Status**: Waiting for approval\n\nPlease approve in ServiceNow before merging this PR.\"}" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/issues/${{ github.event.number }}/comments"
+
+  verify-and-deploy:
+    name: 🚀 Verify Approval & Deploy
+    runs-on: ubuntu-latest
+    needs: create-servicenow-cr
+    if: github.event.action == 'closed' && github.event.pull_request.merged == true
+    outputs:
+      cr-number: ${{ steps.verify-approval.outputs.cr-number }}
+      cr-sys-id: ${{ steps.verify-approval.outputs.cr-sys-id }}
+      approved: ${{ steps.verify-approval.outputs.approved }}
+      version: ${{ steps.build.outputs.version }}
+    
+    steps:
+      - name: Verify ServiceNow Approval
+        id: verify-approval
+        run: |
+          echo "🔍 Verifying ServiceNow approval for PR #${{ github.event.number }}..."
+          
+          # Search for CR by PR number - this is the most reliable method
+          RESPONSE=$(curl -s \
+            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request?sysparm_query=u_pr_number=${{ github.event.number }}^short_descriptionLIKEAbbott%20Weather%20API")
+          
+          CR_COUNT=$(echo "$RESPONSE" | jq '.result | length')
+          echo "📊 Found $CR_COUNT CR(s) for PR #${{ github.event.number }}"
+          
+          if [ "$CR_COUNT" -gt 0 ]; then
+            CR_NUMBER=$(echo "$RESPONSE" | jq -r '.result[0].number')
+            CR_SYS_ID=$(echo "$RESPONSE" | jq -r '.result[0].sys_id')
+            APPROVAL=$(echo "$RESPONSE" | jq -r '.result[0].approval')
+            
+            echo "✅ Found Change Request: $CR_NUMBER"
+            echo "✔️ Approval Status: $APPROVAL"
+            
+            if [ "$APPROVAL" = "approved" ]; then
+              echo "🎉 ServiceNow approval verified for CR: $CR_NUMBER"
+              echo "approved=true" >> $GITHUB_OUTPUT
+              echo "cr-number=$CR_NUMBER" >> $GITHUB_OUTPUT
+              echo "cr-sys-id=$CR_SYS_ID" >> $GITHUB_OUTPUT
+            else
+              echo "❌ CR $CR_NUMBER is not approved (status: $APPROVAL)"
+              echo "🚨 BLOCKING DEPLOYMENT - CR requires approval"
+              exit 1
+            fi
+          else
+            echo "❌ No ServiceNow Change Request found for PR #${{ github.event.number }}"
+            echo "🚨 BLOCKING DEPLOYMENT - No valid Change Request found"
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v3
       
@@ -59,7 +145,7 @@ jobs:
           dotnet-version: ${{ env.DOTNET_VERSION }}
           
       - name: Generate Version
-        id: version
+        id: build
         run: |
           VERSION="1.0.${{ github.run_number }}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
@@ -79,150 +165,6 @@ jobs:
         
       - name: Publish Application
         run: dotnet publish ./src/WeatherAPI/WeatherAPI.csproj -c Release -o ./publish
-        
-      - name: Upload Build Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: webapp-artifact-${{ steps.version.outputs.version }}
-          path: ./publish
-
-  create-servicenow-cr:
-    name: 📋 Create ServiceNow Change Request
-    runs-on: ubuntu-latest
-    needs: security-scan
-    if: github.event_name == 'pull_request'
-    outputs:
-      cr-number: ${{ steps.create-cr.outputs.cr-number }}
-      cr-sys-id: ${{ steps.create-cr.outputs.cr-sys-id }}
-    
-    steps:
-      - name: Create ServiceNow Change Request
-        id: create-cr
-        run: |
-          echo "Creating ServiceNow Change Request..."
-          
-          RESPONSE=$(curl -s -X POST \
-            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "short_description": "Deploy Abbott Weather API - PR #${{ github.event.number }}",
-              "description": "Automated deployment request\nRepository: ${{ github.repository }}\nPR: ${{ github.event.pull_request.title }}\nBranch: ${{ github.event.pull_request.head.ref }}\nAuthor: ${{ github.event.pull_request.user.login }}\nCommit: ${{ github.event.pull_request.head.sha }}",
-              "category": "Software",
-              "priority": "3",
-              "risk": "3",
-              "state": "1",
-              "type": "normal",
-              "u_commit_sha": "${{ github.event.pull_request.head.sha }}"
-            }' \
-            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request")
-          
-          CR_NUMBER=$(echo "$RESPONSE" | jq -r '.result.number')
-          CR_SYS_ID=$(echo "$RESPONSE" | jq -r '.result.sys_id')
-          
-          echo "cr-number=$CR_NUMBER" >> $GITHUB_OUTPUT
-          echo "cr-sys-id=$CR_SYS_ID" >> $GITHUB_OUTPUT
-          
-          echo "✅ ServiceNow Change Request created: $CR_NUMBER"
-
-          # Add comment to PR
-          curl -X POST \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d "{\"body\": \"📋 **ServiceNow Change Request Created**\n\n- **Change Request**: [$CR_NUMBER](${{ secrets.SERVICENOW_INSTANCE }}/nav_to.do?uri=change_request.do?sys_id=$CR_SYS_ID)\n- **Status**: Waiting for approval\n\nPlease approve in ServiceNow before merging this PR.\"}" \
-            "${{ github.api_url }}/repos/${{ github.repository }}/issues/${{ github.event.number }}/comments"
- 
-  verify-servicenow-approval:
-    name: 📋 Verify ServiceNow Approval
-    runs-on: ubuntu-latest
-    needs: build-and-test
-    if: github.event_name == 'push'
-    outputs:
-      approved: ${{ steps.check-approval.outputs.approved }}
-      cr-number: ${{ steps.check-approval.outputs.cr-number }}
-      cr-sys-id: ${{ steps.check-approval.outputs.cr-sys-id }}
-    
-    steps:
-      - name: Check ServiceNow Approval Status
-        id: check-approval
-        run: |
-          echo "🔍 Looking for ServiceNow Change Request for this deployment..."
-          
-          # PRIORITY 1: Search for recent approved CRs for this repository
-          # This is more reliable than relying on commit SHA matching
-          echo "🔎 Searching for recent approved CRs for repository: ${{ github.repository }}"
-          
-          # Get approved CRs from last 48 hours for this repository
-          RESPONSE=$(curl -s \
-            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
-            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request?sysparm_query=short_descriptionCONTAINSAbbott Weather API^approval=approved^sys_created_on>=javascript:gs.daysAgoStart(2)^ORDERBYDESCsys_created_on&sysparm_limit=5")
-          
-          CR_COUNT=$(echo "$RESPONSE" | jq '.result | length')
-          echo "📊 Found $CR_COUNT approved CR(s) for Abbott Weather API in last 48 hours"
-          
-          if [ "$CR_COUNT" -gt 0 ]; then
-            # Use the most recent approved CR
-            CR_NUMBER=$(echo "$RESPONSE" | jq -r '.result[0].number')
-            CR_SYS_ID=$(echo "$RESPONSE" | jq -r '.result[0].sys_id')
-            APPROVAL=$(echo "$RESPONSE" | jq -r '.result[0].approval')
-            CR_STATE=$(echo "$RESPONSE" | jq -r '.result[0].state')
-            SHORT_DESC=$(echo "$RESPONSE" | jq -r '.result[0].short_description')
-            
-            echo "✅ Found approved Change Request: $CR_NUMBER"
-            echo "📝 Description: $SHORT_DESC"
-            echo "✔️  Approval Status: $APPROVAL"
-            echo "📊 State: $CR_STATE"
-            
-            # Verify it's actually approved
-            if [ "$APPROVAL" = "approved" ]; then
-              echo "🎉 ServiceNow approval verified for CR: $CR_NUMBER"
-              echo "approved=true" >> $GITHUB_OUTPUT
-              echo "cr-number=$CR_NUMBER" >> $GITHUB_OUTPUT
-              echo "cr-sys-id=$CR_SYS_ID" >> $GITHUB_OUTPUT
-              
-              # Update the CR with deployment info
-              echo "📝 Updating CR with deployment details..."
-              curl -s -X PUT \
-                -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
-                -H "Content-Type: application/json" \
-                -d "{
-                  \"u_deployed_commit_sha\": \"${{ github.sha }}\",
-                  \"work_notes\": \"Deployment started for commit ${{ github.sha }}\\nBranch: ${GITHUB_REF#refs/heads/}\\nTriggered by: ${{ github.actor }}\\nWorkflow: ${{ github.run_id }}\"
-                }" \
-                "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/$CR_SYS_ID"
-              
-              echo "✅ Using approved CR: $CR_NUMBER for deployment"
-              
-            else
-              echo "❌ Found CR $CR_NUMBER but it's not approved (status: $APPROVAL)"
-              echo "🚨 BLOCKING DEPLOYMENT - CR requires approval"
-              exit 1
-            fi
-            
-          else
-            echo "❌ No approved ServiceNow Change Request found for Abbott Weather API"
-            echo "🔍 Available options:"
-            echo "1. Ensure a PR was created and CR was approved"
-            echo "2. Check if CR exists but description doesn't match 'Abbott Weather API'"
-            echo "3. Verify approval was completed in ServiceNow"
-            echo ""
-            echo "🚨 BLOCKING DEPLOYMENT - No valid approved Change Request found"
-            exit 1
-          fi
-          
-          echo "🎯 ServiceNow verification completed successfully!"
-
-  deploy-to-azure:
-    name: 🚀 Deploy to Azure App Service
-    runs-on: ubuntu-latest
-    needs: [build-and-test, verify-servicenow-approval]
-    if: github.event_name == 'push' && needs.verify-servicenow-approval.outputs.approved == 'true'
-    
-    steps:
-      - name: Download Build Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: webapp-artifact-${{ needs.build-and-test.outputs.version }}
-          path: ./publish
           
       - name: Azure Login
         uses: azure/login@v1
@@ -243,42 +185,12 @@ jobs:
           echo "🔍 Checking: $HEALTH_URL"
           curl -f "$HEALTH_URL" || echo "Health check endpoint not responding yet"
           echo "✅ Deployment completed"
-          
-      - name: Update ServiceNow CR Status
-        run: |
-          echo "📋 Updating ServiceNow CR: ${{ needs.verify-servicenow-approval.outputs.cr-number }}"
-          
-          # Get current change request data
-          CURRENT_CR=$(curl -s \
-            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
-            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/${{ needs.verify-servicenow-approval.outputs.cr-sys-id }}")
-          
-          CURRENT_VERSION=$(echo "$CURRENT_CR" | jq -r '.result.sys_mod_count')
-          NEW_VERSION=$((CURRENT_VERSION + 1))
-          
-          # Update ServiceNow change request with deployment status
-          UPDATE_RESPONSE=$(curl -s -X PUT \
-            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"state\": \"3\",
-              \"work_notes\": \"Deployment completed successfully\\nVersion: ${{ needs.build-and-test.outputs.version }}\\nDeployed to: ${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net\\nDeployment time: $(date -u)\",
-              \"sys_mod_count\": \"$NEW_VERSION\"
-            }" \
-            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/${{ needs.verify-servicenow-approval.outputs.cr-sys-id }}")
-          
-          if echo "$UPDATE_RESPONSE" | jq -e '.result' > /dev/null; then
-            echo "✅ ServiceNow CR updated successfully"
-          else
-            echo "⚠️ ServiceNow CR update failed, but deployment succeeded"
-            echo "Response: $UPDATE_RESPONSE"
-          fi
 
   update-apim:
     name: 🌐 Update API Management
     runs-on: ubuntu-latest
-    needs: deploy-to-azure
-    if: github.event_name == 'push'
+    needs: verify-and-deploy
+    if: github.event.action == 'closed' && github.event.pull_request.merged == true && needs.verify-and-deploy.outputs.approved == 'true'
 
     steps:
     - name: Azure Login
@@ -290,7 +202,6 @@ jobs:
       run: |
         echo "🌐 Importing API to Azure API Management..."
         
-        # Import the API from your App Service OpenAPI spec
         az apim api import \
           --api-id "abbott-weather-api" \
           --service-name "abbott-apim-demo" \
@@ -302,77 +213,48 @@ jobs:
           --protocols "https"
           
         echo "✅ API imported to APIM successfully"
-        
-    - name: APIM Deployment Summary
-      run: |
-        echo "🎉 API Management Configuration Complete!"
-        echo ""
-        echo "🔗 APIM Gateway URL: https://abbott-apim-demo.azure-api.net/weather"
-        echo "📚 Developer Portal: https://abbott-apim-demo.developer.azure-api.net"
-        echo ""
-        echo "📋 Available Endpoints via APIM:"
-        echo "  GET /weather/api/Weather/forecast - Weather forecast"
-        echo "  GET /weather/api/Weather/current/{city} - Current weather"
-        echo "  GET /weather/api/Weather/test - Test endpoint"
 
-  deployment-summary:
+  deployment-complete:
     name: 📢 Deployment Complete
     runs-on: ubuntu-latest
-    needs: [deploy-to-azure, update-apim, verify-servicenow-approval, build-and-test]
-    if: always() && needs.deploy-to-azure.result == 'success' && github.event_name == 'push'
+    needs: [verify-and-deploy, update-apim]
+    if: always() && needs.verify-and-deploy.result == 'success' && github.event.action == 'closed' && github.event.pull_request.merged == true
     
     steps:
       - name: Checkout
         uses: actions/checkout@v3
         
-      - name: Success Notification
-        run: |
-          echo "🎉 Abbott API Deployment Pipeline Completed Successfully!"
-          echo "================================================================"
-          echo ""
-          echo "📊 Deployment Summary:"
-          echo "  🔐 Security Scan: ✅ Passed"
-          echo "  🔨 Build & Test: ✅ Success"
-          echo "  📋 ServiceNow CR: ${{ needs.verify-servicenow-approval.outputs.cr-number }}"
-          echo "  ✅ ServiceNow Approval: Verified"
-          echo "  🚀 Azure Deployment: Success"
-          echo "  🌐 APIM Update: Complete"
-          echo "  📝 Version: ${{ needs.build-and-test.outputs.version }}"
-          echo ""
-          echo "🔗 Live Endpoints:"
-          echo "  📱 Swagger UI: https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net/swagger"
-          echo "  🏥 Health Check: https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net/health"
-          echo "  🌐 API Gateway: https://abbott-apim-demo.azure-api.net/weather"
-          echo ""
-          echo "🎯 Abbott API Modernization: DEPLOYMENT SUCCESSFUL!"
-
       - name: Get Extended Deployment Info
         id: extended-info
         run: |
           echo "build-number=${{ github.run_number }}" >> $GITHUB_OUTPUT
-          echo "commit-sha=${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
+          echo "commit-sha=${{ github.event.pull_request.merge_commit_sha }}" >> $GITHUB_OUTPUT
           echo "deploy-time=$(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> $GITHUB_OUTPUT
-          echo "version=1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
-          echo "branch=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
+          echo "version=${{ needs.verify-and-deploy.outputs.version }}" >> $GITHUB_OUTPUT
           echo "actor=${{ github.actor }}" >> $GITHUB_OUTPUT
           echo "repository=${{ github.repository }}" >> $GITHUB_OUTPUT
-          
-          # Get commit message and author
-          COMMIT_MSG=$(git log -1 --pretty=format:"%s")
-          COMMIT_AUTHOR=$(git log -1 --pretty=format:"%an")
-          echo "commit-message=${COMMIT_MSG}" >> $GITHUB_OUTPUT
-          echo "commit-author=${COMMIT_AUTHOR}" >> $GITHUB_OUTPUT
-          
-          # Azure resource info
+          echo "pr-title=${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT
+          echo "pr-author=${{ github.event.pull_request.user.login }}" >> $GITHUB_OUTPUT
           echo "app-service-url=https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net" >> $GITHUB_OUTPUT
           echo "apim-gateway-url=https://abbott-apim-demo.azure-api.net/weather" >> $GITHUB_OUTPUT
-          echo "resource-group=abbott-demo-rg" >> $GITHUB_OUTPUT
+
+      - name: Update ServiceNow CR Status
+        run: |
+          echo "📋 Updating ServiceNow CR: ${{ needs.verify-and-deploy.outputs.cr-number }}"
+          
+          curl -s -X PUT \
+            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"state\": \"3\",
+              \"work_notes\": \"Deployment completed successfully\\nVersion: ${{ needs.build-and-test.outputs.version }}\\nDeployed to: ${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net\\nDeployment time: ${{ steps.extended-info.outputs.deploy-time }}\\nMerge commit: ${{ steps.extended-info.outputs.commit-sha }}\"
+            }" \
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/${{ needs.verify-and-deploy.outputs.cr-sys-id }}"
 
       - name: Update Confluence Documentation
         run: |
           echo "📝 Updating Confluence documentation..."
           
-          # Create credentials for Confluence API
           CONFLUENCE_USER="ahamed.musthafa@agilisium.com"
           CONFLUENCE_TOKEN="${{ secrets.CONFLUENCE_API_TOKEN }}"
           CONFLUENCE_URL="${{ secrets.CONFLUENCE_BASE_URL }}"
@@ -394,7 +276,9 @@ jobs:
           <strong>Version:</strong> ${{ steps.extended-info.outputs.version }}<br/>
           <strong>Build Number:</strong> ${{ steps.extended-info.outputs.build-number }}<br/>
           <strong>Deployed by:</strong> ${{ steps.extended-info.outputs.actor }}<br/>
-          <strong>ServiceNow CR:</strong> ${{ needs.verify-servicenow-approval.outputs.cr-number }}</p>
+          <strong>ServiceNow CR:</strong> ${{ needs.verify-and-deploy.outputs.cr-number }}<br/>
+          <strong>PR Title:</strong> ${{ steps.extended-info.outputs.pr-title }}<br/>
+          <strong>PR Author:</strong> ${{ steps.extended-info.outputs.pr-author }}</p>
           
           <h2>Infrastructure Details</h2>
           <p><strong>App Service:</strong> ${{ env.AZURE_WEBAPP_NAME }}<br/>
@@ -412,7 +296,7 @@ jobs:
           
           <h2>Integration Workflow</h2>
           <p>This deployment followed the complete enterprise workflow:<br/>
-          JIRA → GitHub PR → Security Scan → ServiceNow Approval → Azure Deployment → APIM → Documentation</p>
+          JIRA → GitHub PR → Security Scan → ServiceNow Approval → Merge & Deploy → APIM → Documentation</p>
           
           <p><em>Last updated: ${{ steps.extended-info.outputs.deploy-time }} by automated deployment pipeline</em></p>'
           
@@ -447,5 +331,260 @@ jobs:
             echo "HTTP code: $HTTP_CODE"
           fi
           
-          # Clean up
           rm confluence_payload.json
+
+      - name: Update JIRA Ticket with Confluence Link
+        run: |
+          echo "🎫 Updating JIRA ticket with deployment documentation..."
+          
+          # Extract JIRA ticket from PR title
+          JIRA_KEY=$(echo "${{ steps.extended-info.outputs.pr-title }}" | grep -oE '[A-Z]+-[0-9]+' | head -1)
+          
+          if [ -z "$JIRA_KEY" ]; then
+            echo "ℹ️ No JIRA ticket found in PR title"
+            echo "💡 Tip: Include JIRA key (e.g., ABBOTT-123) in PR titles"
+          else
+            echo "🎫 Found JIRA ticket: $JIRA_KEY"
+            
+            # Update JIRA ticket with deployment info and Confluence link
+            JIRA_COMMENT='{
+              "body": {
+                "type": "doc",
+                "version": 1,
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "🚀 Deployment Completed Successfully!"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "📊 Details:"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "bulletList",
+                    "content": [
+                      {
+                        "type": "listItem",
+                        "content": [
+                          {
+                            "type": "paragraph",
+                            "content": [
+                              {
+                                "type": "text",
+                                "text": "Version: ${{ steps.extended-info.outputs.version }}"
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "type": "listItem",
+                        "content": [
+                          {
+                            "type": "paragraph",
+                            "content": [
+                              {
+                                "type": "text",
+                                "text": "ServiceNow CR: ${{ needs.verify-and-deploy.outputs.cr-number }}"
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "type": "listItem",
+                        "content": [
+                          {
+                            "type": "paragraph",
+                            "content": [
+                              {
+                                "type": "text",
+                                "text": "Live URL: "
+                              },
+                              {
+                                "type": "text",
+                                "text": "${{ steps.extended-info.outputs.app-service-url }}",
+                                "marks": [
+                                  {
+                                    "type": "link",
+                                    "attrs": {
+                                      "href": "${{ steps.extended-info.outputs.app-service-url }}"
+                                    }
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "type": "listItem",
+                        "content": [
+                          {
+                            "type": "paragraph",
+                            "content": [
+                              {
+                                "type": "text",
+                                "text": "📚 Documentation: "
+                              },
+                              {
+                                "type": "text",
+                                "text": "Abbott API Documentation",
+                                "marks": [
+                                  {
+                                    "type": "link",
+                                    "attrs": {
+                                      "href": "${{ secrets.CONFLUENCE_BASE_URL }}/wiki/spaces/ABBOTT/pages/${{ secrets.CONFLUENCE_PAGE_ID }}"
+                                    }
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }'
+            
+            # Post comment to JIRA
+            JIRA_RESPONSE=$(curl -w "%{http_code}" -s \
+              -u "${{ secrets.JIRA_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
+              -X POST \
+              -H "Content-Type: application/json" \
+              -d "$JIRA_COMMENT" \
+              "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/$JIRA_KEY/comment")
+            
+            HTTP_CODE="${JIRA_RESPONSE: -3}"
+            if [ "$HTTP_CODE" = "201" ]; then
+              echo "✅ JIRA ticket $JIRA_KEY updated with deployment info and Confluence link"
+            else
+              echo "⚠️ JIRA update failed but deployment succeeded"
+              echo "HTTP code: $HTTP_CODE"
+            fi
+          fi
+
+      - name: Send Slack Notification
+        run: |
+          echo "Sending deployment notification to Slack..."
+          
+          # Extract JIRA ticket from PR title
+          JIRA_KEY=$(echo "${{ steps.extended-info.outputs.pr-title }}" | grep -oE '[A-Z]+-[0-9]+' | head -1)
+          if [ -z "$JIRA_KEY" ]; then
+            JIRA_KEY="No JIRA ticket found"
+          fi
+          
+          # Create simple Slack webhook message
+          SLACK_MESSAGE='{
+            "text": "Abbott API Deployment Completed Successfully",
+            "blocks": [
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": "Abbott API Deployment Complete"
+                }
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Status:* SUCCESS"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Version:* ${{ steps.extended-info.outputs.version }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*ServiceNow CR:* ${{ needs.verify-and-deploy.outputs.cr-number }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Deploy Time:* ${{ steps.extended-info.outputs.deploy-time }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*PR:* #${{ github.event.number }} - ${{ steps.extended-info.outputs.pr-title }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*PR Author:* ${{ steps.extended-info.outputs.pr-author }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*JIRA:* '"$JIRA_KEY"'"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Commit:* ${{ steps.extended-info.outputs.commit-sha }}"
+                  }
+                ]
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Quick Links:*\n<${{ steps.extended-info.outputs.app-service-url }}|Live API> | <${{ steps.extended-info.outputs.apim-gateway-url }}|API Gateway> | <${{ steps.extended-info.outputs.app-service-url }}/swagger|Swagger UI> | <${{ steps.extended-info.outputs.app-service-url }}/health|Health Check>\n<${{ secrets.CONFLUENCE_BASE_URL }}/wiki/spaces/ABBOTT/pages/${{ secrets.CONFLUENCE_PAGE_ID }}|Confluence Doc> | <${{ secrets.SERVICENOW_INSTANCE }}/nav_to.do?uri=change_request.do?sys_id=${{ needs.verify-and-deploy.outputs.cr-sys-id }}|ServiceNow CR>"
+                }
+              },
+              {
+                "type": "context",
+                "elements": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "Deployed by ${{ steps.extended-info.outputs.actor }} | Abbott API Modernization Project"
+                  }
+                ]
+              }
+            ]
+          }'
+          
+          # Send to Slack webhook
+          SLACK_RESPONSE=$(curl -w "%{http_code}" -s \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "$SLACK_MESSAGE" \
+            "${{ secrets.SLACK_WEBHOOK_URL }}")
+          
+          HTTP_CODE="${SLACK_RESPONSE: -3}"
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "Slack notification sent successfully"
+          else
+            echo "Slack notification failed (HTTP: $HTTP_CODE)"
+            echo "Response: $SLACK_RESPONSE"
+          fi
+
+      - name: Deployment Success Summary
+        run: |
+          echo "🎉 Abbott API Deployment Pipeline Completed Successfully!"
+          echo "================================================================"
+          echo ""
+          echo "📊 Deployment Summary:"
+          echo "  🔐 Security Scan: ✅ Passed"
+          echo "  🔨 Build & Test: ✅ Success"
+          echo "  📋 ServiceNow CR: ${{ needs.verify-and-deploy.outputs.cr-number }}"
+          echo "  ✅ ServiceNow Approval: Verified"
+          echo "  🚀 Azure Deployment: Success"
+          echo "  🌐 APIM Update: Complete"
+          echo "  📝 Version: ${{ steps.extended-info.outputs.version }}"
+          echo ""
+          echo "🔗 Live Endpoints:"
+          echo "  📱 Swagger UI: ${{ steps.extended-info.outputs.app-service-url }}/swagger"
+          echo "  🏥 Health Check: ${{ steps.extended-info.outputs.app-service-url }}/health"
+          echo "  🌐 API Gateway: ${{ steps.extended-info.outputs.apim-gateway-url }}"
+          echo ""
+          echo "🎯 Abbott API Modernization: DEPLOYMENT SUCCESSFUL!"
