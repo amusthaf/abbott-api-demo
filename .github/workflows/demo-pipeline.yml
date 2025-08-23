@@ -108,7 +108,7 @@ jobs:
   verify-and-deploy:
     name: 🚀 Verify Approval & Deploy
     runs-on: ubuntu-latest
-    needs: create-servicenow-cr
+    # Remove dependency on create-servicenow-cr for merge events
     if: github.event.action == 'closed' && github.event.pull_request.merged == true
     outputs:
       cr-number: ${{ steps.verify-approval.outputs.cr-number }}
