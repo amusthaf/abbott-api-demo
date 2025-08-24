@@ -697,6 +697,19 @@ jobs:
             echo "Response: $SLACK_RESPONSE"
           fi
 
+      - name: Update GitHub PR with Final Status
+        run: |
+          echo "Updating GitHub PR with final deployment status..."
+          
+          # Post final deployment completion comment to PR
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"body\": \"## 🎉 Deployment Completed Successfully!\n\n**Abbott Weather API v${{ steps.extended-info.outputs.version }}** has been deployed to production.\n\n### 📊 Deployment Summary\n- **ServiceNow CR**: [${{ needs.verify-and-deploy.outputs.cr-number }}](${{ secrets.SERVICENOW_INSTANCE }}/nav_to.do?uri=change_request.do?sys_id=${{ needs.verify-and-deploy.outputs.cr-sys-id }}) ✅ Closed\n- **Build**: #${{ steps.extended-info.outputs.build-number }}\n- **Deployed by**: ${{ steps.extended-info.outputs.actor }}\n- **Timestamp**: ${{ steps.extended-info.outputs.deploy-time }}\n\n### 🔗 Live Environment\n- [Live API](${{ steps.extended-info.outputs.app-service-url }}) 🌐\n- [API Gateway](${{ steps.extended-info.outputs.apim-gateway-url }}) ⚡\n- [Swagger Documentation](${{ steps.extended-info.outputs.app-service-url }}/swagger) 📚\n- [Health Check](${{ steps.extended-info.outputs.app-service-url }}/health) 💚\n\n### 📝 Documentation\n- [Confluence Documentation](${{ secrets.CONFLUENCE_BASE_URL }}/wiki/spaces/ABBOTT/pages/${{ secrets.CONFLUENCE_PAGE_ID }}) has been updated\n- JIRA ticket updated with deployment details\n\n**Status**: ✅ **DEPLOYMENT SUCCESSFUL** ✅\"
+            }" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/issues/${{ github.event.number }}/comments"
+
       - name: Deployment Success Summary
         run: |
           echo "🎉 Abbott API Deployment Pipeline Completed Successfully!"
