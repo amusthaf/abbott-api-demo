@@ -129,10 +129,10 @@ jobs:
         run: |
           echo "🔍 Verifying ServiceNow approval for PR #${{ github.event.number }}..."
           
-          # Search for CR by PR number - this is the most reliable method
+          # Search for CR by PR number with more specific query
           RESPONSE=$(curl -s \
             -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
-            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request?sysparm_query=u_pr_number=${{ github.event.number }}^short_descriptionLIKEAbbott%20Weather%20API")
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request?sysparm_query=u_pr_number=${{ github.event.number }}^short_descriptionCONTAINSPR%20%23${{ github.event.number }}^ORDERBYDESCsys_created_on&sysparm_limit=1")
           
           CR_COUNT=$(echo "$RESPONSE" | jq '.result | length')
           echo "📊 Found $CR_COUNT CR(s) for PR #${{ github.event.number }}"
@@ -294,6 +294,8 @@ jobs:
           echo "pr-author=${{ github.event.pull_request.user.login }}" >> $GITHUB_OUTPUT
           echo "app-service-url=https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net" >> $GITHUB_OUTPUT
           echo "apim-gateway-url=https://abbott-apim-demo.azure-api.net/weather" >> $GITHUB_OUTPUT
+          echo "workflow-run-id=${{ github.run_id }}" >> $GITHUB_OUTPUT
+          echo "build-timestamp=$(date -u +"%Y%m%d-%H%M%S")" >> $GITHUB_OUTPUT
 
       - name: Update ServiceNow CR Status
         run: |
@@ -537,13 +539,22 @@ jobs:
         run: |
           echo "Sending deployment notification to Slack..."
           
-          # Extract JIRA ticket from PR title
-          JIRA_KEY=$(echo "${{ steps.extended-info.outputs.pr-title }}" | grep -oE '[A-Z]+-[0-9]+' | head -1)
-          if [ -z "$JIRA_KEY" ]; then
-            JIRA_KEY="No JIRA ticket found"
+          # Extract JIRA ticket from PR title or branch
+          JIRA_KEY=""
+          JIRA_FROM_TITLE=$(echo "${{ steps.extended-info.outputs.pr-title }}" | grep -oE '[A-Z]+-[0-9]+' | head -1)
+          
+          if [ -z "$JIRA_FROM_TITLE" ]; then
+            JIRA_FROM_BRANCH=$(echo "${{ github.event.pull_request.head.ref }}" | grep -oE '[A-Z]+-[0-9]+' | head -1)
+            JIRA_KEY="$JIRA_FROM_BRANCH"
+          else
+            JIRA_KEY="$JIRA_FROM_TITLE"
           fi
           
-          # Create simple Slack webhook message
+          if [ -z "$JIRA_KEY" ]; then
+            JIRA_KEY="Not specified"
+          fi
+          
+          # Create enhanced Slack webhook message with images
           SLACK_MESSAGE='{
             "text": "Abbott API Deployment Completed Successfully",
             "blocks": [
@@ -551,59 +562,120 @@ jobs:
                 "type": "header",
                 "text": {
                   "type": "plain_text",
-                  "text": "Abbott API Deployment Complete"
+                  "text": "Abbott API Deployment Complete",
+                  "emoji": true
                 }
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": ":white_check_mark: *Deployment Status: SUCCESS*\n:rocket: Abbott Weather API has been successfully deployed to production!"
+                },
+                "accessory": {
+                  "type": "image",
+                  "image_url": "https://img.icons8.com/color/96/000000/checked-2.png",
+                  "alt_text": "Success"
+                }
+              },
+              {
+                "type": "divider"
               },
               {
                 "type": "section",
                 "fields": [
                   {
                     "type": "mrkdwn",
-                    "text": "*Status:* SUCCESS"
+                    "text": "*Version:*\n${{ steps.extended-info.outputs.version }}"
                   },
                   {
                     "type": "mrkdwn",
-                    "text": "*Version:* ${{ steps.extended-info.outputs.version }}"
+                    "text": "*Build:*\n#${{ steps.extended-info.outputs.build-number }}"
                   },
                   {
                     "type": "mrkdwn",
-                    "text": "*ServiceNow CR:* ${{ needs.verify-and-deploy.outputs.cr-number }}"
+                    "text": "*ServiceNow CR:*\n${{ needs.verify-and-deploy.outputs.cr-number }}"
                   },
                   {
                     "type": "mrkdwn",
-                    "text": "*Deploy Time:* ${{ steps.extended-info.outputs.deploy-time }}"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*PR:* #${{ github.event.number }} - ${{ steps.extended-info.outputs.pr-title }}"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*PR Author:* ${{ steps.extended-info.outputs.pr-author }}"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*JIRA:* '"$JIRA_KEY"'"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*Commit:* ${{ steps.extended-info.outputs.commit-sha }}"
+                    "text": "*Deploy Time:*\n${{ steps.extended-info.outputs.deploy-time }}"
                   }
                 ]
               },
               {
                 "type": "section",
+                "fields": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "*PR Details:*\n#${{ github.event.number }} - ${{ steps.extended-info.outputs.pr-title }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*JIRA Ticket:*\n'"$JIRA_KEY"'"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Author:*\n${{ steps.extended-info.outputs.pr-author }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Commit:*\n`${{ steps.extended-info.outputs.commit-sha }}`"
+                  }
+                ]
+              },
+              {
+                "type": "divider"
+              },
+              {
+                "type": "section",
                 "text": {
                   "type": "mrkdwn",
-                  "text": "*Quick Links:*\n<${{ steps.extended-info.outputs.app-service-url }}|Live API> | <${{ steps.extended-info.outputs.apim-gateway-url }}|API Gateway> | <${{ steps.extended-info.outputs.app-service-url }}/swagger|Swagger UI> | <${{ steps.extended-info.outputs.app-service-url }}/health|Health Check>\n<${{ secrets.CONFLUENCE_BASE_URL }}/wiki/spaces/ABBOTT/pages/${{ secrets.CONFLUENCE_PAGE_ID }}|Confluence Doc> | <${{ secrets.SERVICENOW_INSTANCE }}/nav_to.do?uri=change_request.do?sys_id=${{ needs.verify-and-deploy.outputs.cr-sys-id }}|ServiceNow CR>"
+                  "text": "*:link: Quick Access Links:*"
+                },
+                "accessory": {
+                  "type": "image",
+                  "image_url": "https://img.icons8.com/fluency/48/000000/api.png",
+                  "alt_text": "API"
                 }
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": ":globe_with_meridians: <${{ steps.extended-info.outputs.app-service-url }}|Live API> | :gear: <${{ steps.extended-info.outputs.apim-gateway-url }}|API Gateway> | :page_facing_up: <${{ steps.extended-info.outputs.app-service-url }}/swagger|Swagger UI>\n:stethoscope: <${{ steps.extended-info.outputs.app-service-url }}/health|Health Check> | :books: <${{ secrets.CONFLUENCE_BASE_URL }}/wiki/spaces/ABBOTT/pages/${{ secrets.CONFLUENCE_PAGE_ID }}|Documentation> | :clipboard: <${{ secrets.SERVICENOW_INSTANCE }}/nav_to.do?uri=change_request.do?sys_id=${{ needs.verify-and-deploy.outputs.cr-sys-id }}|ServiceNow CR>"
+                }
+              },
+              {
+                "type": "divider"
               },
               {
                 "type": "context",
                 "elements": [
                   {
+                    "type": "image",
+                    "image_url": "https://img.icons8.com/color/24/000000/github.png",
+                    "alt_text": "GitHub"
+                  },
+                  {
                     "type": "mrkdwn",
-                    "text": "Deployed by ${{ steps.extended-info.outputs.actor }} | Abbott API Modernization Project"
+                    "text": "Deployed by *${{ steps.extended-info.outputs.actor }}* | Abbott API Modernization Project | Build: ${{ steps.extended-info.outputs.build-timestamp }}"
+                  }
+                ]
+              }
+            ],
+            "attachments": [
+              {
+                "color": "good",
+                "fields": [
+                  {
+                    "title": "Deployment Pipeline Status",
+                    "value": ":white_check_mark: Security Scan\n:white_check_mark: Build & Test\n:white_check_mark: ServiceNow Approval\n:white_check_mark: Azure Deploy\n:white_check_mark: APIM Update\n:white_check_mark: Documentation Updated",
+                    "short": true
+                  },
+                  {
+                    "title": "Environment Details",
+                    "value": ":cloud: Azure App Service\n:round_pushpin: Central India\n:shield: Production Environment\n:chart_with_upwards_trend: Auto-scaling Enabled",
+                    "short": true
                   }
                 ]
               }
