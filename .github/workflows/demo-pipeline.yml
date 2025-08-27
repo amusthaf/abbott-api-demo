@@ -591,15 +591,23 @@ jobs:
               -u "${{ secrets.JIRA_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
               -X POST \
               -H "Content-Type: application/json" \
-              -d '{"transition": {"id": "41"}}' \
+              -d '{"transition": {"id": "21"}}' \
               "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/$JIRA_KEY/transitions")
             
             JIRA_TRANSITION_HTTP_CODE="${JIRA_TRANSITION_RESPONSE: -3}"
             if [ "$JIRA_TRANSITION_HTTP_CODE" = "204" ]; then
               echo "JIRA ticket $JIRA_KEY moved to Review status successfully"
             else
-              echo "JIRA transition failed (HTTP: $JIRA_TRANSITION_HTTP_CODE) - transition ID may not exist for this workflow"
+              echo "JIRA transition failed (HTTP: $JIRA_TRANSITION_HTTP_CODE) - trying alternative transition ID"
               echo "Response: $JIRA_TRANSITION_RESPONSE"
+              
+              # Try alternative transition ID for Review
+              curl -s \
+                -u "${{ secrets.JIRA_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
+                -X POST \
+                -H "Content-Type: application/json" \
+                -d '{"transition": {"id": "31"}}' \
+                "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/$JIRA_KEY/transitions" || echo "Alternative transition also failed"
             fi
           fi
 
@@ -774,7 +782,7 @@ jobs:
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d "{
-              \"body\": \"## Deployment Completed Successfully!\n\n**Abbott Weather API v${{ steps.extended-info.outputs.version }}** has been deployed to production.\n\n### Deployment Summary\n- **ServiceNow CR**: [${{ needs.verify-and-deploy.outputs.cr-number }}](${{ secrets.SERVICENOW_INSTANCE }}/nav_to.do?uri=change_request.do?sys_id=${{ needs.verify-and-deploy.outputs.cr-sys-id }}) Ready for Review\n- **Build**: #${{ steps.extended-info.outputs.build-number }}\n- **Deployed by**: ${{ steps.extended-info.outputs.actor }}\n- **Timestamp**: ${{ steps.extended-info.outputs.deploy-time }}\n\n### Live Environment\n- [Live API](${{ steps.extended-info.outputs.app-service-url }})\n- [API Gateway](${{ steps.extended-info.outputs.apim-gateway-url }})\n- [Swagger Documentation](${{ steps.extended-info.outputs.app-service-url }}/swagger)\n- [Health Check](${{ steps.extended-info.outputs.app-service-url }}/health)\n\n### Documentation\n- [Confluence Documentation](${{ secrets.CONFLUENCE_BASE_URL }}/wiki/spaces/ABBOTT/pages/${{ secrets.CONFLUENCE_PAGE_ID }}) has been updated\n- JIRA ticket updated with deployment details\n\n**Status**: DEPLOYMENT SUCCESSFUL\"
+              \"body\": \"## 🎉 Deployment Completed Successfully!\n\n**Abbott Weather API v${{ steps.extended-info.outputs.version }}** has been deployed to production.\n\n### 📊 Deployment Summary\n- **ServiceNow CR**: [${{ needs.verify-and-deploy.outputs.cr-number }}](${{ secrets.SERVICENOW_INSTANCE }}/nav_to.do?uri=change_request.do?sys_id=${{ needs.verify-and-deploy.outputs.cr-sys-id }}) ✅ Ready for Review\n- **Build**: #${{ steps.extended-info.outputs.build-number }}\n- **Deployed by**: ${{ steps.extended-info.outputs.actor }}\n- **Timestamp**: ${{ steps.extended-info.outputs.deploy-time }}\n\n### 🔗 Live Environment\n- [Live API](${{ steps.extended-info.outputs.app-service-url }}) 🌐\n- [API Gateway](${{ steps.extended-info.outputs.apim-gateway-url }}) ⚡\n- [Swagger Documentation](${{ steps.extended-info.outputs.app-service-url }}/swagger) 📚\n- [Health Check](${{ steps.extended-info.outputs.app-service-url }}/health) 💚\n\n### 📝 Documentation\n- [Confluence Documentation](${{ secrets.CONFLUENCE_BASE_URL }}/wiki/spaces/ABBOTT/pages/${{ secrets.CONFLUENCE_PAGE_ID }}) has been updated\n- JIRA ticket updated with deployment details\n\n**Status**: ✅ **DEPLOYMENT SUCCESSFUL** ✅\"
             }" \
             "${{ github.api_url }}/repos/${{ github.repository }}/issues/${{ github.event.number }}/comments"
 
