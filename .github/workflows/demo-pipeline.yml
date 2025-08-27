@@ -16,8 +16,8 @@ env:
   DOTNET_VERSION: '6.0.x'
 
 jobs:
-  1-security-scan:
-    name: 1. Security & Code Quality
+  step1_security_scan:
+    name: "1. Security & Code Quality"
     runs-on: ubuntu-latest
     if: github.event.action != 'closed'
     steps:
@@ -41,10 +41,10 @@ jobs:
           dotnet list ./src/WeatherAPI package --vulnerable --include-transitive || true
           echo "Security scan completed"
 
-  2-create-servicenow-cr:
-    name: 2. Create ServiceNow Change Request
+  step2_create_servicenow_cr:
+    name: "2. Create ServiceNow Change Request"
     runs-on: ubuntu-latest
-    needs: 1-security-scan
+    needs: step1_security_scan
     if: github.event.action == 'opened' || github.event.action == 'reopened'
     outputs:
       cr-number: ${{ steps.create-cr.outputs.cr-number }}
@@ -87,8 +87,8 @@ jobs:
             -d "{\"body\": \"ServiceNow Change Request Created\n\n- **Change Request**: [$CR_NUMBER](${{ secrets.SERVICENOW_INSTANCE }}/nav_to.do?uri=change_request.do?sys_id=$CR_SYS_ID)\n- **Status**: Waiting for approval\n\nPlease approve in ServiceNow before merging this PR.\"}" \
             "${{ github.api_url }}/repos/${{ github.repository }}/issues/${{ github.event.number }}/comments"
 
-  3-verify-and-deploy:
-    name: 3. Verify Approval & Deploy
+  step3_verify_and_deploy:
+    name: "3. Verify Approval & Deploy"
     runs-on: ubuntu-latest
     if: github.event.action == 'closed' && github.event.pull_request.merged == true
     outputs:
@@ -231,11 +231,11 @@ jobs:
           curl -f "$HEALTH_URL" || echo "Health check endpoint not responding yet"
           echo "✅ Deployment completed"
 
-  4-update-apim:
-    name: 4. Update API Management
+  step4_update_apim:
+    name: "4. Update API Management"
     runs-on: ubuntu-latest
-    needs: 3-verify-and-deploy
-    if: github.event.action == 'closed' && github.event.pull_request.merged == true && needs.3-verify-and-deploy.outputs.approved == 'true'
+    needs: step3_verify_and_deploy
+    if: github.event.action == 'closed' && github.event.pull_request.merged == true && needs.step3_verify_and_deploy.outputs.approved == 'true'
 
     steps:
     - name: Azure Login
@@ -259,11 +259,11 @@ jobs:
           
         echo "API imported to APIM successfully"
 
-  5-deployment-complete:
-    name: 5. Deployment Complete
+  step5_deployment_complete:
+    name: "5. Deployment Complete"
     runs-on: ubuntu-latest
-    needs: [3-verify-and-deploy, 4-update-apim]
-    if: always() && needs.3-verify-and-deploy.result == 'success' && github.event.action == 'closed' && github.event.pull_request.merged == true
+    needs: [step3_verify_and_deploy, step4_update_apim]
+    if: always() && needs.step3_verify_and_deploy.result == 'success' && github.event.action == 'closed' && github.event.pull_request.merged == true
     
     steps:
       - name: Checkout
@@ -275,7 +275,7 @@ jobs:
           echo "build-number=${{ github.run_number }}" >> $GITHUB_OUTPUT
           echo "commit-sha=${{ github.event.pull_request.merge_commit_sha }}" >> $GITHUB_OUTPUT
           echo "deploy-time=$(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> $GITHUB_OUTPUT
-          echo "version=${{ needs.3-verify-and-deploy.outputs.version }}" >> $GITHUB_OUTPUT
+          echo "version=${{ needs.step3_verify_and_deploy.outputs.version }}" >> $GITHUB_OUTPUT
           echo "actor=${{ github.actor }}" >> $GITHUB_OUTPUT
           echo "repository=${{ github.repository }}" >> $GITHUB_OUTPUT
           echo "pr-title=${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT
@@ -287,7 +287,7 @@ jobs:
 
       - name: Update ServiceNow CR Status
         run: |
-          echo "Updating ServiceNow CR: ${{ needs.3-verify-and-deploy.outputs.cr-number }}"
+          echo "Updating ServiceNow CR: ${{ needs.step3_verify_and_deploy.outputs.cr-number }}"
           
           # Step 1: Move CR to Implement state with deployment notes
           echo "Moving CR to Implement state..."
@@ -298,7 +298,7 @@ jobs:
               \"state\": \"5\",
               \"work_notes\": \"Deployment completed successfully\\nVersion: ${{ needs.verify-and-deploy.outputs.version }}\\nDeployed to: ${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net\\nDeployment time: ${{ steps.extended-info.outputs.deploy-time }}\\nMerge commit: ${{ steps.extended-info.outputs.commit-sha }}\"
             }" \
-            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/${{ needs.3-verify-and-deploy.outputs.cr-sys-id }}")
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/${{ needs.step3_verify_and_deploy.outputs.cr-sys-id }}")
           
           IMPLEMENT_HTTP_CODE="${IMPLEMENT_RESPONSE: -3}"
           if [ "$IMPLEMENT_HTTP_CODE" = "200" ]; then
@@ -319,7 +319,7 @@ jobs:
               \"state\": \"6\",
               \"work_notes\": \"Deployment implementation complete. Ready for review and closure.\"
             }" \
-            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/${{ needs.3-verify-and-deploy.outputs.cr-sys-id }}")
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/${{ needs.step3_verify_and_deploy.outputs.cr-sys-id }}")
           
           REVIEW_HTTP_CODE="${REVIEW_RESPONSE: -3}"
           if [ "$REVIEW_HTTP_CODE" = "200" ]; then
@@ -483,7 +483,7 @@ jobs:
                             "content": [
                               {
                                 "type": "text",
-                                "text": "ServiceNow CR: ${{ needs.3-verify-and-deploy.outputs.cr-number }}"
+                                "text": "ServiceNow CR: ${{ needs.step3_verify_and_deploy.outputs.cr-number }}"
                               }
                             ]
                           }
@@ -671,7 +671,7 @@ jobs:
                 "type": "section",
                 "text": {
                   "type": "mrkdwn",
-                  "text": ":globe_with_meridians: <${{ steps.extended-info.outputs.app-service-url }}|Live API> | :gear: <${{ steps.extended-info.outputs.apim-gateway-url }}|API Gateway> | :page_facing_up: <${{ steps.extended-info.outputs.app-service-url }}/swagger|Swagger UI>\n:stethoscope: <${{ steps.extended-info.outputs.app-service-url }}/health|Health Check> | :books: <${{ secrets.CONFLUENCE_BASE_URL }}/wiki/spaces/ABBOTT/pages/${{ secrets.CONFLUENCE_PAGE_ID }}|Documentation> | :clipboard: <${{ secrets.SERVICENOW_INSTANCE }}/nav_to.do?uri=change_request.do?sys_id=${{ needs.3-verify-and-deploy.outputs.cr-sys-id }}|ServiceNow CR>"
+                  "text": ":globe_with_meridians: <${{ steps.extended-info.outputs.app-service-url }}|Live API> | :gear: <${{ steps.extended-info.outputs.apim-gateway-url }}|API Gateway> | :page_facing_up: <${{ steps.extended-info.outputs.app-service-url }}/swagger|Swagger UI>\n:stethoscope: <${{ steps.extended-info.outputs.app-service-url }}/health|Health Check> | :books: <${{ secrets.CONFLUENCE_BASE_URL }}/wiki/spaces/ABBOTT/pages/${{ secrets.CONFLUENCE_PAGE_ID }}|Documentation> | :clipboard: <${{ secrets.SERVICENOW_INSTANCE }}/nav_to.do?uri=change_request.do?sys_id=${{ needs.step3_verify_and_deploy.outputs.cr-sys-id }}|ServiceNow CR>"
                 }
               },
               {
@@ -735,7 +735,7 @@ jobs:
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d "{
-              \"body\": \"## 🎉 Deployment Completed Successfully!\n\n**Abbott Weather API v${{ steps.extended-info.outputs.version }}** has been deployed to production.\n\n### 📊 Deployment Summary\n          - **ServiceNow CR**: [${{ needs.3-verify-and-deploy.outputs.cr-number }}](${{ secrets.SERVICENOW_INSTANCE }}/nav_to.do?uri=change_request.do?sys_id=${{ needs.3-verify-and-deploy.outputs.cr-sys-id }}) ✅ Ready for Review\n- **Build**: #${{ steps.extended-info.outputs.build-number }}\n- **Deployed by**: ${{ steps.extended-info.outputs.actor }}\n- **Timestamp**: ${{ steps.extended-info.outputs.deploy-time }}\n\n### 🔗 Live Environment\n- [Live API](${{ steps.extended-info.outputs.app-service-url }}) 🌐\n- [API Gateway](${{ steps.extended-info.outputs.apim-gateway-url }}) ⚡\n- [Swagger Documentation](${{ steps.extended-info.outputs.app-service-url }}/swagger) 📚\n- [Health Check](${{ steps.extended-info.outputs.app-service-url }}/health) 💚\n\n### 📝 Documentation\n- [Confluence Documentation](${{ secrets.CONFLUENCE_BASE_URL }}/wiki/spaces/ABBOTT/pages/${{ secrets.CONFLUENCE_PAGE_ID }}) has been updated\n- JIRA ticket updated with deployment details\n\n**Status**: ✅ **DEPLOYMENT SUCCESSFUL** ✅\"
+              \"body\": \"## 🎉 Deployment Completed Successfully!\n\n**Abbott Weather API v${{ steps.extended-info.outputs.version }}** has been deployed to production.\n\n### 📊 Deployment Summary\n          - **ServiceNow CR**: [${{ needs.step3_verify_and_deploy.outputs.cr-number }}](${{ secrets.SERVICENOW_INSTANCE }}/nav_to.do?uri=change_request.do?sys_id=${{ needs.step3_verify_and_deploy.outputs.cr-sys-id }}) ✅ Ready for Review\n- **Build**: #${{ steps.extended-info.outputs.build-number }}\n- **Deployed by**: ${{ steps.extended-info.outputs.actor }}\n- **Timestamp**: ${{ steps.extended-info.outputs.deploy-time }}\n\n### 🔗 Live Environment\n- [Live API](${{ steps.extended-info.outputs.app-service-url }}) 🌐\n- [API Gateway](${{ steps.extended-info.outputs.apim-gateway-url }}) ⚡\n- [Swagger Documentation](${{ steps.extended-info.outputs.app-service-url }}/swagger) 📚\n- [Health Check](${{ steps.extended-info.outputs.app-service-url }}/health) 💚\n\n### 📝 Documentation\n- [Confluence Documentation](${{ secrets.CONFLUENCE_BASE_URL }}/wiki/spaces/ABBOTT/pages/${{ secrets.CONFLUENCE_PAGE_ID }}) has been updated\n- JIRA ticket updated with deployment details\n\n**Status**: ✅ **DEPLOYMENT SUCCESSFUL** ✅\"
             }" \
             "${{ github.api_url }}/repos/${{ github.repository }}/issues/${{ github.event.number }}/comments"
 
@@ -747,7 +747,7 @@ jobs:
           echo "📊 Deployment Summary:"
           echo "  🔐 Security Scan: ✅ Passed"
           echo "  🔨 Build & Test: ✅ Success"
-          echo "  📋 ServiceNow CR: ${{ needs.3-verify-and-deploy.outputs.cr-number }}"
+          echo "  📋 ServiceNow CR: ${{ needs.step3_verify_and_deploy.outputs.cr-number }}"
           echo "  ✅ ServiceNow Approval: Verified"
           echo "  🚀 Azure Deployment: Success"
           echo "  🌐 APIM Update: Complete"
