@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  AZURE_WEBAPP_NAME: 'abbott-api-demo-1755844033'
+  AZURE_WEBAPP_NAME: 'abbott-api-demo-1756831829'
   AZURE_LOCATION: 'Central India'
   DOTNET_VERSION: '6.0.x'
 
