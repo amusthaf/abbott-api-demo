@@ -21,6 +21,6 @@ public class WeatherController : ControllerBase
     [HttpGet("current/{city}")]
     public IActionResult GetCurrentWeather(string city)
     {
-        return Ok(new { City = city, Message = "City weather API works for Arnie!" });
+        return Ok(new { City = city, Message = "City weather API Demo works for Vijay!" });
     }
 }
