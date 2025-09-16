@@ -67,6 +67,10 @@ jobs:
               "risk": "3",
               "state": "1",
               "type": "normal",
+              "requested_by": "${{ secrets.SERVICENOW_USERNAME }}",
+              "assignment_group": "Change Management",
+              "assigned_to": "Change Manager",
+              "approval": "requested",
               "u_commit_sha": "${{ github.event.pull_request.head.sha }}",
               "u_pr_number": "${{ github.event.number }}"
             }' \
