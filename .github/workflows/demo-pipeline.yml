@@ -167,55 +167,57 @@ jobs:
           # Wait a moment for the CR to be fully created
           sleep 2
           
-          # Create approval record using the user sys_id we already looked up
-          if [ -n "${{ steps.lookup-user.outputs.user_sys_id }}" ]; then
-            APPROVER_SYS_ID="${{ steps.lookup-user.outputs.user_sys_id }}"
-            echo "Creating approval record with user sys_id: $APPROVER_SYS_ID"
-            
-            APPROVAL_RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -X POST \
-              -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
-              -H "Content-Type: application/json" \
-              -d "{
-                \"document_id\": \"$CR_SYS_ID\",
-                \"source_table\": \"change_request\",
-                \"approver\": \"$APPROVER_SYS_ID\",
-                \"state\": \"requested\",
-                \"due_date\": \"$(date -u -d '+1 day' '+%Y-%m-%d %H:%M:%S')\",
-                \"comments\": \"Approval requested for GitHub Actions automated deployment - PR #${{ github.event.number }}\",
-                \"expected_start\": \"$(date -u '+%Y-%m-%d %H:%M:%S')\"
-              }" \
-              "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/sysapproval_approver")
-            
-            APPROVAL_HTTP_STATUS=$(echo "$APPROVAL_RESPONSE" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
-            APPROVAL_BODY=$(echo "$APPROVAL_RESPONSE" | sed 's/HTTPSTATUS:[0-9]*$//')
-            
-            echo "Approval creation HTTP Status: $APPROVAL_HTTP_STATUS"
-            
-            if [ "$APPROVAL_HTTP_STATUS" = "201" ]; then
-              APPROVAL_SYS_ID=$(echo "$APPROVAL_BODY" | jq -r '.result.sys_id')
-              echo "Approval record created successfully: $APPROVAL_SYS_ID"
-            else
-              echo "Failed to create approval record. HTTP: $APPROVAL_HTTP_STATUS"
-              echo "Response: ${APPROVAL_BODY:0:300}"
-            fi
-          else
-            echo "No user sys_id available, skipping direct approval creation"
-          fi
-          
-          # Move CR to Assess state
-          echo "Moving CR to Assess state..."
-          curl -s -X PUT \
+          # Method 1: Try using the approval engine API endpoint
+          echo "Triggering approval workflow via approval engine..."
+          ENGINE_RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -X POST \
             -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
             -H "Content-Type: application/json" \
             -d "{
-              \"state\": \"2\",
-              \"approval\": \"requested\",
-              \"work_notes\": \"CR moved to Assess state for GitHub Actions deployment - PR #${{ github.event.number }}\"
+              \"sysparm_table\": \"change_request\",
+              \"sysparm_sys_id\": \"$CR_SYS_ID\"
             }" \
-            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/$CR_SYS_ID"
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/sn_approval_api/approval/request")
           
-          # Wait for approval workflow to process
-          sleep 3
+          ENGINE_HTTP_STATUS=$(echo "$ENGINE_RESPONSE" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
+          ENGINE_BODY=$(echo "$ENGINE_RESPONSE" | sed 's/HTTPSTATUS:[0-9]*$//')
+          
+          echo "Approval engine HTTP Status: $ENGINE_HTTP_STATUS"
+          echo "Approval engine response: ${ENGINE_BODY:0:200}"
+          
+          if [ "$ENGINE_HTTP_STATUS" != "200" ] && [ "$ENGINE_HTTP_STATUS" != "201" ]; then
+            echo "Approval engine method failed, trying workflow trigger..."
+            
+            # Method 2: Try triggering workflow via business rule simulation
+            WF_RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -X PUT \
+              -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"approval\": \"requested\",
+                \"work_notes\": \"Triggering approval workflow for GitHub Actions deployment - PR #${{ github.event.number }}\"
+              }" \
+              "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/$CR_SYS_ID")
+            
+            WF_HTTP_STATUS=$(echo "$WF_RESPONSE" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
+            echo "Workflow trigger HTTP Status: $WF_HTTP_STATUS"
+            
+            sleep 2
+            
+            # Method 3: If workflow trigger didn't work, try state change approach
+            if [ "$WF_HTTP_STATUS" = "200" ]; then
+              echo "Moving CR to Assess state to trigger approvals..."
+              curl -s -X PUT \
+                -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+                -H "Content-Type: application/json" \
+                -d "{
+                  \"state\": \"2\",
+                  \"work_notes\": \"Moved to Assess state to trigger approval workflow\"
+                }" \
+                "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/$CR_SYS_ID"
+            fi
+          fi
+          
+          # Wait for approval processing
+          sleep 5
           
           # Verify approval records were created
           VERIFY_APPROVALS=$(curl -s \
@@ -223,13 +225,17 @@ jobs:
             "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/sysapproval_approver?sysparm_query=document_id=$CR_SYS_ID")
           
           APPROVAL_COUNT=$(echo "$VERIFY_APPROVALS" | jq '.result | length')
-          echo "Found $APPROVAL_COUNT approval record(s) after creation attempt"
+          echo "Found $APPROVAL_COUNT approval record(s) after workflow trigger"
           
           if [ "$APPROVAL_COUNT" -gt 0 ]; then
-            echo "Approval workflow setup successfully"
+            echo "Approval workflow triggered successfully"
             echo "$VERIFY_APPROVALS" | jq -r '.result[] | "- Approval ID: \(.sys_id) | Approver: \(.approver.display_value // .approver) | State: \(.state)"'
+            APPROVAL_STATUS="automated"
           else
-            echo "Warning: No approval records found. Manual approval may be required in ServiceNow"
+            echo "Automatic approval creation failed - this is common in ServiceNow Developer instances"
+            echo "The Change Request $CR_NUMBER has been created and assigned properly"
+            echo "Manual approval request may be required due to ServiceNow Developer instance limitations"
+            APPROVAL_STATUS="manual_required"
           fi
 
           # Add comment to PR
