@@ -297,62 +297,43 @@ jobs:
         echo "Deploying SOAP API to Azure API Management..."
         
         API_ID="soap-${{ env.API_PATH }}-api"
+        APIM_GATEWAY_URL="https://${{ env.APIM_SERVICE_NAME }}.azure-api.net"
+        API_ENDPOINT="$APIM_GATEWAY_URL/${{ env.API_PATH }}"
         
         echo "Using SOAP WSDL: ${{ env.SOAP_WSDL_URL }}"
         echo "APIM Service: ${{ env.APIM_SERVICE_NAME }}"
         echo "API Path: /${{ env.API_PATH }}"
         echo "API ID: $API_ID"
         
-        # First, let's try with a different SOAP service that's more APIM-friendly
-        # Using Calculator Web Service that has simpler endpoint structure
-        CALCULATOR_WSDL="http://webservices.oorsprong.org/websamples.countryinfo/CountryInfoService.wso?WSDL"
-        
-        # If using the original calculator, let's try with specific service endpoint
-        if [[ "${{ env.SOAP_WSDL_URL }}" == *"calculator.asmx"* ]]; then
-          echo "Using Calculator SOAP service with specific configuration..."
-          
-          # Import SOAP API with specific service URL to avoid multiple endpoint issue
-          az apim api import \
-            --api-id "$API_ID" \
-            --service-name "${{ env.APIM_SERVICE_NAME }}" \
-            --resource-group "${{ env.RESOURCE_GROUP }}" \
-            --specification-format "Wsdl" \
-            --specification-url "${{ env.SOAP_WSDL_URL }}" \
-            --path "${{ env.API_PATH }}" \
-            --display-name "Calculator SOAP API" \
-            --protocols "https" \
-            --service-url "http://www.dneonline.com/calculator.asmx" \
-            --soap-api-type "SoapToRest"
-            
-        else
-          echo "Using custom WSDL URL..."
-          # Import SOAP API from custom WSDL
-          az apim api import \
-            --api-id "$API_ID" \
-            --service-name "${{ env.APIM_SERVICE_NAME }}" \
-            --resource-group "${{ env.RESOURCE_GROUP }}" \
-            --specification-format "Wsdl" \
-            --specification-url "${{ env.SOAP_WSDL_URL }}" \
-            --path "${{ env.API_PATH }}" \
-            --display-name "SOAP ${{ env.API_PATH }} API" \
-            --protocols "https" \
-            --soap-api-type "SoapToRest"
-        fi
-        
-        echo "SOAP API imported successfully"
-        
-        # Get the API gateway URL
-        APIM_GATEWAY_URL="https://${{ env.APIM_SERVICE_NAME }}.azure-api.net"
-        API_ENDPOINT="$APIM_GATEWAY_URL/${{ env.API_PATH }}"
+        # Import with explicit service + endpoint names to resolve multiple endpoint issue
+        echo "Importing SOAP API with specific service and endpoint names..."
+        az apim api import \
+          --api-id "$API_ID" \
+          --service-name "${{ env.APIM_SERVICE_NAME }}" \
+          --resource-group "${{ env.RESOURCE_GROUP }}" \
+          --specification-format "Wsdl" \
+          --specification-url "${{ env.SOAP_WSDL_URL }}" \
+          --path "${{ env.API_PATH }}" \
+          --display-name "Calculator SOAP API" \
+          --protocols "https" \
+          --soap-api-type "SoapToRest" \
+          --wsdl-service-name "Calculator" \
+          --wsdl-endpoint-name "CalculatorSoap"
         
         echo "api-gateway-url=$APIM_GATEWAY_URL" >> $GITHUB_OUTPUT
         echo "soap-endpoint=$API_ENDPOINT" >> $GITHUB_OUTPUT
         
         echo "API Gateway URL: $APIM_GATEWAY_URL"
         echo "SOAP API Endpoint: $API_ENDPOINT"
-        
-        # List the available operations
+        echo "SOAP API imported successfully"
+
+    - name: List API Operations
+      run: |
         echo "Listing available API operations..."
+        
+        API_ID="soap-${{ env.API_PATH }}-api"
+        
+        # Get operations list for output
         OPERATIONS=$(az apim api operation list \
           --api-id "$API_ID" \
           --service-name "${{ env.APIM_SERVICE_NAME }}" \
@@ -360,9 +341,9 @@ jobs:
           --query '[].displayName' \
           --output tsv | tr '\n' ',' | sed 's/,$//')
         
-        echo "api-operations=$OPERATIONS" >> $GITHUB_OUTPUT
         echo "Available Operations: $OPERATIONS"
         
+        # Display detailed operations table
         az apim api operation list \
           --api-id "$API_ID" \
           --service-name "${{ env.APIM_SERVICE_NAME }}" \
@@ -372,7 +353,7 @@ jobs:
         
         # Test API connectivity
         echo "Testing API Gateway connectivity..."
-        curl -f -s "$APIM_GATEWAY_URL" > /dev/null && echo "API Gateway is accessible" || echo "Warning: API Gateway connectivity test failed"
+        curl -f -s "${{ steps.deploy-api.outputs.api-gateway-url }}" > /dev/null && echo "API Gateway is accessible" || echo "Warning: API Gateway connectivity test failed"
         
         echo "SOAP API deployment to APIM completed successfully"
 
