@@ -51,29 +51,83 @@ jobs:
       cr-sys-id: ${{ steps.create-cr.outputs.cr-sys-id }}
     
     steps:
+      - name: Lookup Assignment Group sys_id
+        id: lookup-group
+        run: |
+          echo "Looking up Change Management group..."
+          GROUP_RESPONSE=$(curl -s \
+            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/sys_user_group?sysparm_query=name=Change%20Management&sysparm_fields=sys_id,name")
+          
+          echo "Group lookup response: $GROUP_RESPONSE"
+          GROUP_SYS_ID=$(echo "$GROUP_RESPONSE" | jq -r '.result[0].sys_id // empty')
+          
+          if [ -z "$GROUP_SYS_ID" ] || [ "$GROUP_SYS_ID" = "null" ]; then
+            echo "Change Management group not found, will use group name instead"
+            echo "group_sys_id=" >> $GITHUB_OUTPUT
+          else
+            echo "Found group sys_id: $GROUP_SYS_ID"
+            echo "group_sys_id=$GROUP_SYS_ID" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Lookup Assigned To sys_id
+        id: lookup-user
+        run: |
+          echo "Looking up Change Manager user..."
+          USER_RESPONSE=$(curl -s \
+            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/sys_user?sysparm_query=name=Change%20Manager^ORuser_name=Change%20Manager&sysparm_fields=sys_id,name,user_name")
+          
+          echo "User lookup response: $USER_RESPONSE"
+          USER_SYS_ID=$(echo "$USER_RESPONSE" | jq -r '.result[0].sys_id // empty')
+          
+          if [ -z "$USER_SYS_ID" ] || [ "$USER_SYS_ID" = "null" ]; then
+            echo "Change Manager user not found, will use username instead"
+            echo "user_sys_id=" >> $GITHUB_OUTPUT
+          else
+            echo "Found user sys_id: $USER_SYS_ID"
+            echo "user_sys_id=$USER_SYS_ID" >> $GITHUB_OUTPUT
+          fi
+
       - name: Create ServiceNow Change Request
         id: create-cr
         run: |
           echo "Creating ServiceNow Change Request..."
           
+          # Use sys_id if available, otherwise use name
+          if [ -n "${{ steps.lookup-group.outputs.group_sys_id }}" ]; then
+            ASSIGNMENT_GROUP="${{ steps.lookup-group.outputs.group_sys_id }}"
+          else
+            ASSIGNMENT_GROUP="Change Management"
+          fi
+          
+          if [ -n "${{ steps.lookup-user.outputs.user_sys_id }}" ]; then
+            ASSIGNED_TO="${{ steps.lookup-user.outputs.user_sys_id }}"
+          else
+            ASSIGNED_TO="Change Manager"
+          fi
+          
+          echo "Using assignment_group: $ASSIGNMENT_GROUP"
+          echo "Using assigned_to: $ASSIGNED_TO"
+          
           RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -X POST \
             -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
             -H "Content-Type: application/json" \
-            -d '{
-              "short_description": "Deploy Abbott Weather API - PR #${{ github.event.number }}",
-              "description": "Automated deployment request\nRepository: ${{ github.repository }}\nPR: ${{ github.event.pull_request.title }}\nBranch: ${{ github.event.pull_request.head.ref }}\nAuthor: ${{ github.event.pull_request.user.login }}\nCommit: ${{ github.event.pull_request.head.sha }}\nPR URL: ${{ github.event.pull_request.html_url }}",
-              "category": "Software",
-              "priority": "3",
-              "risk": "3",
-              "state": "1",
-              "type": "normal",
-              "requested_by": "${{ secrets.SERVICENOW_USERNAME }}",
-              "assignment_group": "Change Management",
-              "assigned_to": "Change Manager",
-              "approval": "requested",
-              "u_commit_sha": "${{ github.event.pull_request.head.sha }}",
-              "u_pr_number": "${{ github.event.number }}"
-            }' \
+            -d "{
+              \"short_description\": \"Deploy Abbott Weather API - PR #${{ github.event.number }}\",
+              \"description\": \"Automated deployment request\\nRepository: ${{ github.repository }}\\nPR: ${{ github.event.pull_request.title }}\\nBranch: ${{ github.event.pull_request.head.ref }}\\nAuthor: ${{ github.event.pull_request.user.login }}\\nCommit: ${{ github.event.pull_request.head.sha }}\\nPR URL: ${{ github.event.pull_request.html_url }}\",
+              \"category\": \"Software\",
+              \"priority\": \"3\",
+              \"risk\": \"3\",
+              \"state\": \"1\",
+              \"type\": \"normal\",
+              \"requested_by\": \"${{ secrets.SERVICENOW_USERNAME }}\",
+              \"assignment_group\": \"$ASSIGNMENT_GROUP\",
+              \"assigned_to\": \"$ASSIGNED_TO\",
+              \"approval\": \"requested\",
+              \"u_commit_sha\": \"${{ github.event.pull_request.head.sha }}\",
+              \"u_pr_number\": \"${{ github.event.number }}\"
+            }" \
             "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request")
           
           # Extract HTTP status and body
