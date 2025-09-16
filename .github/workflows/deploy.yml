@@ -1,0 +1,126 @@
+name: Abbott SOAP API Deployment
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+env:
+  SOAP_WSDL_URL: 'http://www.dneonline.com/calculator.asmx?wsdl'
+  API_PATH: 'calculator'
+  APIM_SERVICE_NAME: 'abbott-apim-demo-04'
+  RESOURCE_GROUP: 'abbott-demo-rg'
+
+jobs:
+  wait-for-approval:
+    name: Wait for ServiceNow CR Approval
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lookup CR by commit SHA
+        id: find-cr
+        run: |
+          echo "Looking up CR in ServiceNow for commit: ${{ github.sha }}"
+
+          RESPONSE=$(curl -s \
+            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request?sysparm_query=u_commit_sha=${{ github.sha }}&sysparm_fields=sys_id,number,approval,state")
+
+          echo "Response: $RESPONSE"
+          CR_SYS_ID=$(echo "$RESPONSE" | jq -r '.result[0].sys_id // empty')
+          CR_NUMBER=$(echo "$RESPONSE" | jq -r '.result[0].number // empty')
+
+          if [ -z "$CR_SYS_ID" ]; then
+            echo "❌ No matching CR found in ServiceNow"
+            exit 1
+          fi
+
+          echo "cr-sys-id=$CR_SYS_ID" >> $GITHUB_OUTPUT
+          echo "cr-number=$CR_NUMBER" >> $GITHUB_OUTPUT
+
+      - name: Wait for Approval
+        run: |
+          CR_SYS_ID="${{ steps.find-cr.outputs.cr-sys-id }}"
+          echo "Waiting for CR approval in ServiceNow (sys_id=$CR_SYS_ID)..."
+
+          APPROVAL="requested"
+          ATTEMPTS=0
+          MAX_ATTEMPTS=20   # ~10 minutes (20 * 30s)
+
+          while [ "$APPROVAL" != "approved" ] && [ $ATTEMPTS -lt $MAX_ATTEMPTS ]; do
+            RESPONSE=$(curl -s \
+              -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+              "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/$CR_SYS_ID?sysparm_fields=approval,state")
+
+            APPROVAL=$(echo "$RESPONSE" | jq -r '.result.approval')
+            STATE=$(echo "$RESPONSE" | jq -r '.result.state')
+
+            echo "Attempt $ATTEMPTS: Approval=$APPROVAL, State=$STATE"
+
+            if [ "$APPROVAL" = "approved" ]; then
+              echo "✅ CR approved!"
+              break
+            fi
+
+            if [ "$APPROVAL" = "rejected" ]; then
+              echo "❌ CR rejected"
+              exit 1
+            fi
+
+            ATTEMPTS=$((ATTEMPTS+1))
+            sleep 30
+          done
+
+          if [ "$APPROVAL" != "approved" ]; then
+            echo "❌ Timeout waiting for CR approval"
+            exit 1
+          fi
+
+  deploy-soap-api:
+    name: Deploy SOAP API to APIM
+    runs-on: ubuntu-latest
+    needs: wait-for-approval
+
+    steps:
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Deploy SOAP API
+      id: deploy-api
+      run: |
+        echo "Deploying SOAP API to Azure API Management..."
+
+        API_ID="soap-${{ env.API_PATH }}-api"
+        APIM_GATEWAY_URL="https://${{ env.APIM_SERVICE_NAME }}.azure-api.net"
+        API_ENDPOINT="$APIM_GATEWAY_URL/${{ env.API_PATH }}"
+
+        # Import with explicit service + endpoint names
+        az apim api import \
+          --api-id "$API_ID" \
+          --service-name "${{ env.APIM_SERVICE_NAME }}" \
+          --resource-group "${{ env.RESOURCE_GROUP }}" \
+          --specification-format "Wsdl" \
+          --specification-url "${{ env.SOAP_WSDL_URL }}" \
+          --path "${{ env.API_PATH }}" \
+          --display-name "SOAP ${{ env.API_PATH }} API" \
+          --protocols "https" \
+          --soap-api-type "SoapToRest" \
+          --wsdl-service-name "Calculator" \
+          --wsdl-endpoint-name "CalculatorSoap"
+
+        echo "api-gateway-url=$APIM_GATEWAY_URL" >> $GITHUB_OUTPUT
+        echo "soap-endpoint=$API_ENDPOINT" >> $GITHUB_OUTPUT
+
+        echo "✅ API deployed: $API_ENDPOINT"
+
+    - name: List API Operations
+      run: |
+        az apim api operation list \
+          --api-id "soap-${{ env.API_PATH }}-api" \
+          --service-name "${{ env.APIM_SERVICE_NAME }}" \
+          --resource-group "${{ env.RESOURCE_GROUP }}" \
+          --query '[].{Name:displayName, Method:method, UrlTemplate:urlTemplate}' \
+          --output table
