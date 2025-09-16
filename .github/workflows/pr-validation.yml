@@ -1,0 +1,51 @@
+name: Abbott SOAP API PR Validation
+
+on:
+  pull_request:
+    branches: [ main ]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: read
+
+env:
+  SOAP_WSDL_URL: 'http://www.dneonline.com/calculator.asmx?wsdl'
+  API_PATH: 'calculator'
+
+jobs:
+  security-scan:
+    name: Security & WSDL Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Validate SOAP WSDL
+        run: |
+          echo "Validating SOAP WSDL URL: ${{ env.SOAP_WSDL_URL }}"
+          curl -f -s "${{ env.SOAP_WSDL_URL }}" > /dev/null && echo "WSDL is accessible" || exit 1
+
+  create-servicenow-cr:
+    name: Create ServiceNow Change Request
+    runs-on: ubuntu-latest
+    needs: security-scan
+    steps:
+      - name: Create ServiceNow CR
+        run: |
+          echo "Creating CR in ServiceNow..."
+          RESPONSE=$(curl -s -X POST \
+            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"short_description\": \"Deploy Abbott SOAP API - PR #${{ github.event.number }}\",
+              \"description\": \"Automated CR for SOAP API deployment. PR: ${{ github.event.pull_request.html_url }}\",
+              \"category\": \"Software\",
+              \"priority\": \"3\",
+              \"type\": \"normal\",
+              \"assignment_group\": \"Change Management\",
+              \"assigned_to\": \"Change Manager\",
+              \"approval\": \"requested\"
+            }" \
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request")
+
+          echo "Response: $RESPONSE"
