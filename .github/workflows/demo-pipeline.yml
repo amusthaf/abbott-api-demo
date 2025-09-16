@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  AZURE_WEBAPP_NAME: 'abbott-api-demo-1757946810'
+  AZURE_WEBAPP_NAME: 'abbott-api-demo-1755844033'
   AZURE_LOCATION: 'Central India'
   DOTNET_VERSION: '6.0.x'
 
@@ -56,7 +56,7 @@ jobs:
         run: |
           echo "Creating ServiceNow Change Request..."
           
-          RESPONSE=$(curl -s -X POST \
+          RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -X POST \
             -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
             -H "Content-Type: application/json" \
             -d '{
@@ -72,8 +72,34 @@ jobs:
             }' \
             "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request")
           
-          CR_NUMBER=$(echo "$RESPONSE" | jq -r '.result.number')
-          CR_SYS_ID=$(echo "$RESPONSE" | jq -r '.result.sys_id')
+          # Extract HTTP status and body
+          HTTP_STATUS=$(echo "$RESPONSE" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
+          RESPONSE_BODY=$(echo "$RESPONSE" | sed 's/HTTPSTATUS:[0-9]*$//')
+          
+          echo "ServiceNow HTTP Status: $HTTP_STATUS"
+          echo "ServiceNow Response (first 500 chars): ${RESPONSE_BODY:0:500}"
+          
+          if [ "$HTTP_STATUS" != "201" ]; then
+            echo "ServiceNow API call failed with HTTP status: $HTTP_STATUS"
+            echo "Full response: $RESPONSE_BODY"
+            exit 1
+          fi
+          
+          # Validate JSON response
+          if ! echo "$RESPONSE_BODY" | jq empty 2>/dev/null; then
+            echo "Invalid JSON response from ServiceNow"
+            echo "Response: $RESPONSE_BODY"
+            exit 1
+          fi
+          
+          CR_NUMBER=$(echo "$RESPONSE_BODY" | jq -r '.result.number')
+          CR_SYS_ID=$(echo "$RESPONSE_BODY" | jq -r '.result.sys_id')
+          
+          if [ "$CR_NUMBER" = "null" ] || [ "$CR_SYS_ID" = "null" ]; then
+            echo "Failed to extract CR number or sys_id from response"
+            echo "Response: $RESPONSE_BODY"
+            exit 1
+          fi
           
           echo "cr-number=$CR_NUMBER" >> $GITHUB_OUTPUT
           echo "cr-sys-id=$CR_SYS_ID" >> $GITHUB_OUTPUT
@@ -242,7 +268,7 @@ jobs:
         
         az apim api import \
           --api-id "abbott-weather-api" \
-          --service-name "abbott-apim-demo-04" \
+          --service-name "abbott-apim-demo" \
           --resource-group "abbott-demo-rg" \
           --specification-format "OpenApi" \
           --specification-url "https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net/swagger/v1/swagger.json" \
@@ -274,7 +300,7 @@ jobs:
           echo "pr-title=${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT
           echo "pr-author=${{ github.event.pull_request.user.login }}" >> $GITHUB_OUTPUT
           echo "app-service-url=https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net" >> $GITHUB_OUTPUT
-          echo "apim-gateway-url=https://abbott-apim-demo-04.azure-api.net/weather" >> $GITHUB_OUTPUT
+          echo "apim-gateway-url=https://abbott-apim-demo.azure-api.net/weather" >> $GITHUB_OUTPUT
           echo "workflow-run-id=${{ github.run_id }}" >> $GITHUB_OUTPUT
           echo "build-timestamp=$(date -u +"%Y%m%d-%H%M%S")" >> $GITHUB_OUTPUT
 
@@ -585,29 +611,42 @@ jobs:
               echo "HTTP code: $HTTP_CODE"
             fi
             
-            # Transition JIRA ticket to Review status
-            echo "Moving JIRA ticket to Review status..."
-            JIRA_TRANSITION_RESPONSE=$(curl -w "%{http_code}" -s \
+            # Get available transitions for this JIRA ticket
+            echo "Getting available JIRA transitions..."
+            TRANSITIONS_RESPONSE=$(curl -s \
               -u "${{ secrets.JIRA_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
-              -X POST \
+              -X GET \
               -H "Content-Type: application/json" \
-              -d '{"transition": {"id": "21"}}' \
               "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/$JIRA_KEY/transitions")
             
-            JIRA_TRANSITION_HTTP_CODE="${JIRA_TRANSITION_RESPONSE: -3}"
-            if [ "$JIRA_TRANSITION_HTTP_CODE" = "204" ]; then
-              echo "JIRA ticket $JIRA_KEY moved to Review status successfully"
-            else
-              echo "JIRA transition failed (HTTP: $JIRA_TRANSITION_HTTP_CODE) - trying alternative transition ID"
-              echo "Response: $JIRA_TRANSITION_RESPONSE"
+            echo "Available transitions: $(echo "$TRANSITIONS_RESPONSE" | jq -r '.transitions[] | "\(.id): \(.name)"')"
+            
+            # Try to find Review transition ID
+            REVIEW_TRANSITION_ID=$(echo "$TRANSITIONS_RESPONSE" | jq -r '.transitions[] | select(.name | test("Review|Code Review|In Review"; "i")) | .id' | head -1)
+            
+            if [ -n "$REVIEW_TRANSITION_ID" ] && [ "$REVIEW_TRANSITION_ID" != "null" ]; then
+              echo "Found Review transition ID: $REVIEW_TRANSITION_ID"
               
-              # Try alternative transition ID for Review
-              curl -s \
+              # Transition JIRA ticket to Review status
+              echo "Moving JIRA ticket to Review status..."
+              JIRA_TRANSITION_RESPONSE=$(curl -w "%{http_code}" -s \
                 -u "${{ secrets.JIRA_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
                 -X POST \
                 -H "Content-Type: application/json" \
-                -d '{"transition": {"id": "31"}}' \
-                "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/$JIRA_KEY/transitions" || echo "Alternative transition also failed"
+                -d "{\"transition\": {\"id\": \"$REVIEW_TRANSITION_ID\"}}" \
+                "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/$JIRA_KEY/transitions")
+              
+              JIRA_TRANSITION_HTTP_CODE="${JIRA_TRANSITION_RESPONSE: -3}"
+              if [ "$JIRA_TRANSITION_HTTP_CODE" = "204" ]; then
+                echo "JIRA ticket $JIRA_KEY moved to Review status successfully"
+              else
+                echo "JIRA transition failed (HTTP: $JIRA_TRANSITION_HTTP_CODE)"
+                echo "Response: $JIRA_TRANSITION_RESPONSE"
+              fi
+            else
+              echo "No Review transition found. Available transitions:"
+              echo "$TRANSITIONS_RESPONSE" | jq -r '.transitions[] | "ID: \(.id), Name: \(.name)"'
+              echo "Please check your JIRA workflow configuration"
             fi
           fi
 
