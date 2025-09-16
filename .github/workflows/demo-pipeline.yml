@@ -51,25 +51,83 @@ jobs:
       cr-sys-id: ${{ steps.create-cr.outputs.cr-sys-id }}
     
     steps:
+      - name: Lookup Assignment Group sys_id
+        id: lookup-group
+        run: |
+          echo "Looking up Change Management group..."
+          GROUP_RESPONSE=$(curl -s \
+            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/sys_user_group?sysparm_query=name=Change%20Management&sysparm_fields=sys_id,name")
+          
+          echo "Group lookup response: $GROUP_RESPONSE"
+          GROUP_SYS_ID=$(echo "$GROUP_RESPONSE" | jq -r '.result[0].sys_id // empty')
+          
+          if [ -z "$GROUP_SYS_ID" ] || [ "$GROUP_SYS_ID" = "null" ]; then
+            echo "Change Management group not found, will use group name instead"
+            echo "group_sys_id=" >> $GITHUB_OUTPUT
+          else
+            echo "Found group sys_id: $GROUP_SYS_ID"
+            echo "group_sys_id=$GROUP_SYS_ID" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Lookup Assigned To sys_id
+        id: lookup-user
+        run: |
+          echo "Looking up Change Manager user..."
+          USER_RESPONSE=$(curl -s \
+            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/sys_user?sysparm_query=name=Change%20Manager^ORuser_name=Change%20Manager&sysparm_fields=sys_id,name,user_name")
+          
+          echo "User lookup response: $USER_RESPONSE"
+          USER_SYS_ID=$(echo "$USER_RESPONSE" | jq -r '.result[0].sys_id // empty')
+          
+          if [ -z "$USER_SYS_ID" ] || [ "$USER_SYS_ID" = "null" ]; then
+            echo "Change Manager user not found, will use username instead"
+            echo "user_sys_id=" >> $GITHUB_OUTPUT
+          else
+            echo "Found user sys_id: $USER_SYS_ID"
+            echo "user_sys_id=$USER_SYS_ID" >> $GITHUB_OUTPUT
+          fi
+
       - name: Create ServiceNow Change Request
         id: create-cr
         run: |
           echo "Creating ServiceNow Change Request..."
           
+          # Use sys_id if available, otherwise use name
+          if [ -n "${{ steps.lookup-group.outputs.group_sys_id }}" ]; then
+            ASSIGNMENT_GROUP="${{ steps.lookup-group.outputs.group_sys_id }}"
+          else
+            ASSIGNMENT_GROUP="Change Management"
+          fi
+          
+          if [ -n "${{ steps.lookup-user.outputs.user_sys_id }}" ]; then
+            ASSIGNED_TO="${{ steps.lookup-user.outputs.user_sys_id }}"
+          else
+            ASSIGNED_TO="Change Manager"
+          fi
+          
+          echo "Using assignment_group: $ASSIGNMENT_GROUP"
+          echo "Using assigned_to: $ASSIGNED_TO"
+          
           RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -X POST \
             -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
             -H "Content-Type: application/json" \
-            -d '{
-              "short_description": "Deploy Abbott Weather API - PR #${{ github.event.number }}",
-              "description": "Automated deployment request\nRepository: ${{ github.repository }}\nPR: ${{ github.event.pull_request.title }}\nBranch: ${{ github.event.pull_request.head.ref }}\nAuthor: ${{ github.event.pull_request.user.login }}\nCommit: ${{ github.event.pull_request.head.sha }}\nPR URL: ${{ github.event.pull_request.html_url }}",
-              "category": "Software",
-              "priority": "3",
-              "risk": "3",
-              "state": "1",
-              "type": "normal",
-              "u_commit_sha": "${{ github.event.pull_request.head.sha }}",
-              "u_pr_number": "${{ github.event.number }}"
-            }' \
+            -d "{
+              \"short_description\": \"Deploy Abbott Weather API - PR #${{ github.event.number }}\",
+              \"description\": \"Automated deployment request\\nRepository: ${{ github.repository }}\\nPR: ${{ github.event.pull_request.title }}\\nBranch: ${{ github.event.pull_request.head.ref }}\\nAuthor: ${{ github.event.pull_request.user.login }}\\nCommit: ${{ github.event.pull_request.head.sha }}\\nPR URL: ${{ github.event.pull_request.html_url }}\",
+              \"category\": \"Software\",
+              \"priority\": \"3\",
+              \"risk\": \"3\",
+              \"state\": \"1\",
+              \"type\": \"normal\",
+              \"requested_by\": \"${{ secrets.SERVICENOW_USERNAME }}\",
+              \"assignment_group\": \"$ASSIGNMENT_GROUP\",
+              \"assigned_to\": \"$ASSIGNED_TO\",
+              \"approval\": \"requested\",
+              \"u_commit_sha\": \"${{ github.event.pull_request.head.sha }}\",
+              \"u_pr_number\": \"${{ github.event.number }}\"
+            }" \
             "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request")
           
           # Extract HTTP status and body
@@ -105,6 +163,80 @@ jobs:
           echo "cr-sys-id=$CR_SYS_ID" >> $GITHUB_OUTPUT
           
           echo "ServiceNow Change Request created: $CR_NUMBER"
+
+          # Wait a moment for the CR to be fully created
+          sleep 2
+          
+          # Method 1: Try using the approval engine API endpoint
+          echo "Triggering approval workflow via approval engine..."
+          ENGINE_RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -X POST \
+            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"sysparm_table\": \"change_request\",
+              \"sysparm_sys_id\": \"$CR_SYS_ID\"
+            }" \
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/sn_approval_api/approval/request")
+          
+          ENGINE_HTTP_STATUS=$(echo "$ENGINE_RESPONSE" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
+          ENGINE_BODY=$(echo "$ENGINE_RESPONSE" | sed 's/HTTPSTATUS:[0-9]*$//')
+          
+          echo "Approval engine HTTP Status: $ENGINE_HTTP_STATUS"
+          echo "Approval engine response: ${ENGINE_BODY:0:200}"
+          
+          if [ "$ENGINE_HTTP_STATUS" != "200" ] && [ "$ENGINE_HTTP_STATUS" != "201" ]; then
+            echo "Approval engine method failed, trying workflow trigger..."
+            
+            # Method 2: Try triggering workflow via business rule simulation
+            WF_RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -X PUT \
+              -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"approval\": \"requested\",
+                \"work_notes\": \"Triggering approval workflow for GitHub Actions deployment - PR #${{ github.event.number }}\"
+              }" \
+              "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/$CR_SYS_ID")
+            
+            WF_HTTP_STATUS=$(echo "$WF_RESPONSE" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
+            echo "Workflow trigger HTTP Status: $WF_HTTP_STATUS"
+            
+            sleep 2
+            
+            # Method 3: If workflow trigger didn't work, try state change approach
+            if [ "$WF_HTTP_STATUS" = "200" ]; then
+              echo "Moving CR to Assess state to trigger approvals..."
+              curl -s -X PUT \
+                -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+                -H "Content-Type: application/json" \
+                -d "{
+                  \"state\": \"2\",
+                  \"work_notes\": \"Moved to Assess state to trigger approval workflow\"
+                }" \
+                "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/$CR_SYS_ID"
+            fi
+          fi
+          
+          # Wait for approval processing
+          sleep 5
+          
+          # Verify approval records were created
+          VERIFY_APPROVALS=$(curl -s \
+            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/sysapproval_approver?sysparm_query=document_id=$CR_SYS_ID")
+          
+          APPROVAL_COUNT=$(echo "$VERIFY_APPROVALS" | jq '.result | length')
+          echo "Found $APPROVAL_COUNT approval record(s) after workflow trigger"
+          
+          if [ "$APPROVAL_COUNT" -gt 0 ]; then
+            echo "Approval workflow triggered successfully"
+            echo "$VERIFY_APPROVALS" | jq -r '.result[] | "- Approval ID: \(.sys_id) | Approver: \(.approver.display_value // .approver) | State: \(.state)"'
+            APPROVAL_STATUS="automated"
+          else
+            echo "Automatic approval creation failed - this is common in ServiceNow Developer instances"
+            echo "The Change Request $CR_NUMBER has been created and assigned properly"
+            echo "Manual approval request may be required due to ServiceNow Developer instance limitations"
+            APPROVAL_STATUS="manual_required"
+          fi
 
           # Add comment to PR
           curl -X POST \
