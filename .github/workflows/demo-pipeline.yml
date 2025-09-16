@@ -167,82 +167,52 @@ jobs:
           # Wait a moment for the CR to be fully created
           sleep 2
           
-          # Get the Change Manager user sys_id for approval
-          echo "Getting Change Manager user sys_id..."
-          USER_RESPONSE=$(curl -s \
-            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
-            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/sys_user?sysparm_query=user_name=Change Manager^ORname=Change Manager&sysparm_limit=1")
-          
-          USER_SYS_ID=$(echo "$USER_RESPONSE" | jq -r '.result[0].sys_id // empty')
-          
-          if [ -z "$USER_SYS_ID" ] || [ "$USER_SYS_ID" = "null" ]; then
-            echo "Change Manager user not found, using current user for approval"
-            USER_RESPONSE=$(curl -s \
+          # Create approval record using the user sys_id we already looked up
+          if [ -n "${{ steps.lookup-user.outputs.user_sys_id }}" ]; then
+            APPROVER_SYS_ID="${{ steps.lookup-user.outputs.user_sys_id }}"
+            echo "Creating approval record with user sys_id: $APPROVER_SYS_ID"
+            
+            APPROVAL_RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -X POST \
               -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
-              "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/sys_user?sysparm_query=user_name=${{ secrets.SERVICENOW_USERNAME }}&sysparm_limit=1")
-            USER_SYS_ID=$(echo "$USER_RESPONSE" | jq -r '.result[0].sys_id // empty')
+              -H "Content-Type: application/json" \
+              -d "{
+                \"document_id\": \"$CR_SYS_ID\",
+                \"source_table\": \"change_request\",
+                \"approver\": \"$APPROVER_SYS_ID\",
+                \"state\": \"requested\",
+                \"due_date\": \"$(date -u -d '+1 day' '+%Y-%m-%d %H:%M:%S')\",
+                \"comments\": \"Approval requested for GitHub Actions automated deployment - PR #${{ github.event.number }}\",
+                \"expected_start\": \"$(date -u '+%Y-%m-%d %H:%M:%S')\"
+              }" \
+              "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/sysapproval_approver")
+            
+            APPROVAL_HTTP_STATUS=$(echo "$APPROVAL_RESPONSE" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
+            APPROVAL_BODY=$(echo "$APPROVAL_RESPONSE" | sed 's/HTTPSTATUS:[0-9]*$//')
+            
+            echo "Approval creation HTTP Status: $APPROVAL_HTTP_STATUS"
+            
+            if [ "$APPROVAL_HTTP_STATUS" = "201" ]; then
+              APPROVAL_SYS_ID=$(echo "$APPROVAL_BODY" | jq -r '.result.sys_id')
+              echo "Approval record created successfully: $APPROVAL_SYS_ID"
+            else
+              echo "Failed to create approval record. HTTP: $APPROVAL_HTTP_STATUS"
+              echo "Response: ${APPROVAL_BODY:0:300}"
+            fi
+          else
+            echo "No user sys_id available, skipping direct approval creation"
           fi
           
-          echo "Using approver sys_id: $USER_SYS_ID"
-          
-          # Directly create approval record
-          echo "Creating approval record for CR..."
-          APPROVAL_RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -X POST \
+          # Move CR to Assess state
+          echo "Moving CR to Assess state..."
+          curl -s -X PUT \
             -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
             -H "Content-Type: application/json" \
             -d "{
-              \"document_id\": \"$CR_SYS_ID\",
-              \"source_table\": \"change_request\",
-              \"approver\": \"$USER_SYS_ID\",
-              \"state\": \"requested\",
-              \"due_date\": \"$(date -u -d '+1 day' '+%Y-%m-%d %H:%M:%S')\",
-              \"comments\": \"Approval requested for GitHub Actions automated deployment - PR #${{ github.event.number }}\",
-              \"expected_start\": \"$(date -u '+%Y-%m-%d %H:%M:%S')\",
-              \"sys_created_by\": \"${{ secrets.SERVICENOW_USERNAME }}\"
+              \"state\": \"2\",
+              \"approval\": \"requested\",
+              \"work_notes\": \"CR moved to Assess state for GitHub Actions deployment - PR #${{ github.event.number }}\"
             }" \
-            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/sysapproval_approver")
-          
-          APPROVAL_HTTP_STATUS=$(echo "$APPROVAL_RESPONSE" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
-          APPROVAL_BODY=$(echo "$APPROVAL_RESPONSE" | sed 's/HTTPSTATUS:[0-9]*$//')
-          
-          echo "Approval creation HTTP Status: $APPROVAL_HTTP_STATUS"
-          echo "Approval Response: ${APPROVAL_BODY:0:300}"
-          
-          if [ "$APPROVAL_HTTP_STATUS" = "201" ]; then
-            APPROVAL_SYS_ID=$(echo "$APPROVAL_BODY" | jq -r '.result.sys_id')
-            echo "Approval record created successfully: $APPROVAL_SYS_ID"
-            
-            # Update CR state to Assess after creating approval
-            echo "Moving CR to Assess state..."
-            curl -s -X PUT \
-              -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
-              -H "Content-Type: application/json" \
-              -d "{
-                \"state\": \"2\",
-                \"approval\": \"requested\",
-                \"work_notes\": \"Approval record created and CR moved to Assess state for GitHub Actions deployment - PR #${{ github.event.number }}\"
-              }" \
-              "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/$CR_SYS_ID"
-            
-          else
-            echo "Failed to create approval record directly. HTTP: $APPROVAL_HTTP_STATUS"
-            echo "Response: $APPROVAL_BODY"
-            
-            # Fallback: Try moving to Assess state and updating approval field
-            echo "Trying fallback approach - moving to Assess state..."
-            ASSESS_RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -X PUT \
-              -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
-              -H "Content-Type: application/json" \
-              -d "{
-                \"state\": \"2\",
-                \"approval\": \"requested\",
-                \"work_notes\": \"Moved to Assess state to trigger approval workflow for GitHub Actions deployment - PR #${{ github.event.number }}\"
-              }" \
-              "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/$CR_SYS_ID")
-            
-            ASSESS_HTTP_STATUS=$(echo "$ASSESS_RESPONSE" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
-            echo "Assess state update HTTP Status: $ASSESS_HTTP_STATUS"
-          fi
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/$CR_SYS_ID"
           
           # Wait for approval workflow to process
           sleep 3
@@ -259,8 +229,7 @@ jobs:
             echo "Approval workflow setup successfully"
             echo "$VERIFY_APPROVALS" | jq -r '.result[] | "- Approval ID: \(.sys_id) | Approver: \(.approver.display_value // .approver) | State: \(.state)"'
           else
-            echo "Warning: No approval records found after creation attempts"
-            echo "You may need to manually request approval in ServiceNow"
+            echo "Warning: No approval records found. Manual approval may be required in ServiceNow"
           fi
 
           # Add comment to PR
