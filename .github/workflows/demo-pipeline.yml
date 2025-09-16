@@ -110,6 +110,50 @@ jobs:
           
           echo "ServiceNow Change Request created: $CR_NUMBER"
 
+          # Wait a moment for the CR to be fully created
+          sleep 2
+          
+          # Automatically move CR to Assess state to trigger approval workflow
+          echo "Moving CR to Assess state to trigger approval workflow..."
+          ASSESS_RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -X PUT \
+            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"state\": \"2\",
+              \"work_notes\": \"Automatically moved to Assess state to trigger approval workflow for GitHub Actions deployment - PR #${{ github.event.number }}\"
+            }" \
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/change_request/$CR_SYS_ID")
+          
+          ASSESS_HTTP_STATUS=$(echo "$ASSESS_RESPONSE" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
+          ASSESS_BODY=$(echo "$ASSESS_RESPONSE" | sed 's/HTTPSTATUS:[0-9]*$//')
+          
+          echo "Assess state update HTTP Status: $ASSESS_HTTP_STATUS"
+          
+          if [ "$ASSESS_HTTP_STATUS" = "200" ]; then
+            echo "CR successfully moved to Assess state - approval workflow should be triggered"
+          else
+            echo "Warning: Failed to move CR to Assess state. HTTP: $ASSESS_HTTP_STATUS"
+            echo "Response: ${ASSESS_BODY:0:200}"
+          fi
+          
+          # Wait a moment for approval workflow to process
+          sleep 3
+          
+          # Verify approval records were created
+          VERIFY_APPROVALS=$(curl -s \
+            -u "${{ secrets.SERVICENOW_USERNAME }}:${{ secrets.SERVICENOW_PASSWORD }}" \
+            "${{ secrets.SERVICENOW_INSTANCE }}/api/now/table/sysapproval_approver?sysparm_query=document_id=$CR_SYS_ID")
+          
+          APPROVAL_COUNT=$(echo "$VERIFY_APPROVALS" | jq '.result | length')
+          echo "Found $APPROVAL_COUNT approval record(s) after state change"
+          
+          if [ "$APPROVAL_COUNT" -gt 0 ]; then
+            echo "Approval workflow triggered successfully"
+            echo "$VERIFY_APPROVALS" | jq -r '.result[] | "- Approval ID: \(.sys_id) | Approver: \(.approver.display_value // .approver) | State: \(.state)"'
+          else
+            echo "No approval records found - may need manual approval setup"
+          fi
+
           # Add comment to PR
           curl -X POST \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
