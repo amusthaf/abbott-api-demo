@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  AZURE_WEBAPP_NAME: 'abbott-api-demo-1755844033'
+  AZURE_WEBAPP_NAME: 'abbott-api-demo-1757946810'
   AZURE_LOCATION: 'Central India'
   DOTNET_VERSION: '6.0.x'
 
@@ -268,7 +268,7 @@ jobs:
         
         az apim api import \
           --api-id "abbott-weather-api" \
-          --service-name "abbott-apim-demo" \
+          --service-name "abbott-apim-demo-04" \
           --resource-group "abbott-demo-rg" \
           --specification-format "OpenApi" \
           --specification-url "https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net/swagger/v1/swagger.json" \
@@ -300,7 +300,7 @@ jobs:
           echo "pr-title=${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT
           echo "pr-author=${{ github.event.pull_request.user.login }}" >> $GITHUB_OUTPUT
           echo "app-service-url=https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net" >> $GITHUB_OUTPUT
-          echo "apim-gateway-url=https://abbott-apim-demo.azure-api.net/weather" >> $GITHUB_OUTPUT
+          echo "apim-gateway-url=https://abbott-apim-demo-04.azure-api.net/weather" >> $GITHUB_OUTPUT
           echo "workflow-run-id=${{ github.run_id }}" >> $GITHUB_OUTPUT
           echo "build-timestamp=$(date -u +"%Y%m%d-%H%M%S")" >> $GITHUB_OUTPUT
 
